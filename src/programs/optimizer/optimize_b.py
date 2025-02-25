@@ -1,0 +1,1 @@
+"""Optimize template B-factor"""
