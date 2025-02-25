@@ -19,7 +19,7 @@ class ComputationalConfig(BaseModel):
         Total number of CPUs to use, defaults to 1.
     """
 
-    gpu_ids: list[int] = [0]
+    gpu_ids: int | list[int] = [0]
     num_cpus: Annotated[int, Field(ge=1)] = 1
 
     @field_validator("gpu_ids")  # type: ignore
@@ -47,6 +47,10 @@ class ComputationalConfig(BaseModel):
         -------
         list[torch.device]
         """
+        # Case where gpu_ids is integer
+        if isinstance(self.gpu_ids, int):
+            self.gpu_ids = [self.gpu_ids]
+
         if -1 in self.gpu_ids:
             return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
         if -2 in self.gpu_ids:

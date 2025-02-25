@@ -20,6 +20,20 @@ from tt2dtm.utils.cross_correlation import handle_correlation_mode
 EULER_ANGLE_FMT = "zyz"
 
 
+def combine_euler_angles(angle_a: torch.Tensor, angle_b: torch.Tensor) -> torch.Tensor:
+    """Helper function for composing rotations defined by two sets of Euler angles."""
+    rotmat_a = roma.euler_to_rotmat(
+        EULER_ANGLE_FMT, angle_a, degrees=True, device=angle_a.device
+    )
+    rotmat_b = roma.euler_to_rotmat(
+        EULER_ANGLE_FMT, angle_b, degrees=True, device=angle_b.device
+    )
+    rotmat_c = roma.rotmat_composition((rotmat_a, rotmat_b))
+    euler_angles_c = roma.rotmat_to_euler(EULER_ANGLE_FMT, rotmat_c, degrees=True)
+
+    return euler_angles_c
+
+
 def core_refine_template(
     particle_stack_dft: torch.Tensor,  # (N, H, W)
     template_dft: torch.Tensor,  # (d, h, w)
@@ -88,11 +102,11 @@ def core_refine_template(
     pbar_iter = tqdm.tqdm(
         range(num_particles),
         total=num_particles,
-        desc="Refining particle orientations",
+        desc=f"Refining {num_particles} particles...",
         leave=True,
     )
 
-    # Iterate over each particle in the stack
+    # Iterate over each particle in the stack to get the refined statistics
     refined_statistics = []
     for i in pbar_iter:
         particle_image_dft = particle_stack_dft[i]
@@ -114,7 +128,49 @@ def core_refine_template(
         )
         refined_statistics.append(refined_stats)
 
-    return refined_statistics
+    # For each particle, calculate the new best orientation, defocus, and position
+    refined_cross_correlation = torch.tensor(
+        [stats["max_cc"] for stats in refined_statistics], device=device
+    )
+    refined_defocus_offset = torch.tensor(
+        [stats["refined_defocus_offset"] for stats in refined_statistics],
+        device=device,
+    )
+    refined_pos_y = torch.tensor(
+        [stats["refined_pos_y"] for stats in refined_statistics], device=device
+    )
+    refined_pos_x = torch.tensor(
+        [stats["refined_pos_x"] for stats in refined_statistics], device=device
+    )
+
+    # Offset refined_pos_{x,y} by the extracted box size
+    refined_pos_y -= (H - h + 1) // 2
+    refined_pos_x -= (W - w + 1) // 2
+
+    # Compose the previous Euler angles with the refined offsets
+    refined_euler_angles = torch.empty((num_particles, 3), device=device)
+    for i, stats in enumerate(refined_statistics):
+        composed_refined_angle = combine_euler_angles(
+            euler_angles[i, :],  # original angle
+            torch.tensor(
+                [
+                    stats["refined_phi_offset"],
+                    stats["refined_theta_offset"],
+                    stats["refined_psi_offset"],
+                ],
+                dtype=euler_angles.dtype,
+                device=device,
+            ),
+        )
+        refined_euler_angles[i, :] = composed_refined_angle
+
+    return {
+        "refined_cross_correlation": refined_cross_correlation.cpu(),
+        "refined_euler_angles": refined_euler_angles.cpu(),
+        "refined_defocus_offset": refined_defocus_offset.cpu(),
+        "refined_pos_y": refined_pos_y.cpu(),
+        "refined_pos_x": refined_pos_x.cpu(),
+    }
 
 
 def _core_refine_template_single_thread(
@@ -176,21 +232,13 @@ def _core_refine_template_single_thread(
     crop_W = W - w + 1
 
     # Output best statistics
-    mip = torch.zeros(
-        crop_H, crop_W, device=particle_image_dft.device, dtype=torch.float32
-    )
-    best_phi = torch.zeros(
-        crop_H, crop_W, device=particle_image_dft.device, dtype=torch.float32
-    )
-    best_theta = torch.zeros(
-        crop_H, crop_W, device=particle_image_dft.device, dtype=torch.float32
-    )
-    best_psi = torch.zeros(
-        crop_H, crop_W, device=particle_image_dft.device, dtype=torch.float32
-    )
-    best_defocus = torch.zeros(
-        crop_H, crop_W, device=particle_image_dft.device, dtype=torch.float32
-    )
+    max_cc = -1e9
+    refined_phi_offset = 0.0
+    refined_theta_offset = 0.0
+    refined_psi_offset = 0.0
+    refined_defocus_offset = 0.0
+    refined_pos_y = 0
+    refined_pos_x = 0
 
     # The "best" Euler angle from the match template program
     default_rot_matrix = roma.euler_to_rotmat(
@@ -254,59 +302,33 @@ def _core_refine_template_single_thread(
 
         cross_correlation = cross_correlation[..., :crop_H, :crop_W]  # valid crop
 
-        # Update the best refined statistics
-        euler_angle_offsets_batch = euler_angle_offsets_batch.to(torch.float32)
-        max_values, max_indices = torch.max(
-            cross_correlation.view(-1, crop_H, crop_W), dim=0
-        )
-        max_defocus_idx = max_indices // euler_angle_offsets_batch.shape[0]
-        max_orientation_idx = max_indices % euler_angle_offsets_batch.shape[0]
+        # Update the best refined statistics (only if max is greater than previous)
+        if cross_correlation.max() > max_cc:
+            max_cc = cross_correlation.max()
+            max_idx = torch.argmax(cross_correlation)
+            defocus_idx, angle_idx, y_idx, x_idx = torch.unravel_index(
+                max_idx, cross_correlation.shape
+            )
 
-        update_mask = max_values > mip
-        torch.where(update_mask, max_values, mip, out=mip)
-        torch.where(
-            update_mask,
-            euler_angle_offsets_batch[max_orientation_idx, 0],
-            best_phi,
-            out=best_phi,
-        )
-        torch.where(
-            update_mask,
-            euler_angle_offsets_batch[max_orientation_idx, 1],
-            best_theta,
-            out=best_theta,
-        )
-        torch.where(
-            update_mask,
-            euler_angle_offsets_batch[max_orientation_idx, 2],
-            best_psi,
-            out=best_psi,
-        )
-        torch.where(
-            update_mask,
-            defocus_offsets[max_defocus_idx],
-            best_defocus,
-            out=best_defocus,
-        )
+            refined_phi_offset = euler_angle_offsets_batch[angle_idx, 0]
+            refined_theta_offset = euler_angle_offsets_batch[angle_idx, 1]
+            refined_psi_offset = euler_angle_offsets_batch[angle_idx, 2]
+            refined_defocus_offset = defocus_offsets[defocus_idx]
+            refined_pos_y = y_idx
+            refined_pos_x = x_idx
 
-    # Now find the maximum (x, y) of the MIP and return the best statistics at that pos
-    max_idx = torch.argmax(mip)
-    pox_y, pos_x = torch.unravel_index(max_idx, mip.shape)
-    refined_mip = mip[pox_y, pos_x]
-    refined_phi = best_phi[pox_y, pos_x]
-    refined_theta = best_theta[pox_y, pos_x]
-    refined_psi = best_psi[pox_y, pos_x]
-    refined_defocus = best_defocus[pox_y, pos_x]
-
-    return {
-        "refined_mip": refined_mip,
-        "refined_phi": refined_phi,
-        "refined_theta": refined_theta,
-        "refined_psi": refined_psi,
-        "refined_defocus": refined_defocus,
-        "refined_offset_y": pox_y,
-        "refined_offset_x": pos_x,
+    # Return the refined statistics
+    refined_stats = {
+        "max_cc": max_cc,
+        "refined_phi_offset": refined_phi_offset,
+        "refined_theta_offset": refined_theta_offset,
+        "refined_psi_offset": refined_psi_offset,
+        "refined_defocus_offset": refined_defocus_offset,
+        "refined_pos_y": refined_pos_y,
+        "refined_pos_x": refined_pos_x,
     }
+
+    return refined_stats
 
 
 def cross_correlate_particle_stack(

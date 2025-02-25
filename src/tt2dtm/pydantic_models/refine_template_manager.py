@@ -161,8 +161,8 @@ class RefineTemplateManager(BaseModel2DTM):
         bp_filter_image = bp_config.calculate_bandpass_filter(
             particle_images_dft.shape[-2:]
         )
-        dimensionality = bp_filter_image.sum() + bp_filter_image[:, 1:-1].sum()
-        particle_images_dft /= dimensionality**0.5
+        dimensionality = bp_filter_image.sum()
+        particle_images_dft *= dimensionality**0.5
 
         # Calculate the filters applied to each template (besides CTF)
         projective_filters = self.particle_stack.construct_filter_stack(
@@ -182,9 +182,9 @@ class RefineTemplateManager(BaseModel2DTM):
         # The set of "best" euler angles from match template search
         euler_angles = torch.stack(
             (
-                self.particle_stack.psi,
-                self.particle_stack.theta,
-                self.particle_stack.phi,
+                torch.tensor(self.particle_stack["psi"]),
+                torch.tensor(self.particle_stack["theta"]),
+                torch.tensor(self.particle_stack["phi"]),
             ),
             dim=-1,
         )
@@ -193,9 +193,9 @@ class RefineTemplateManager(BaseModel2DTM):
         euler_angle_offsets = self.orientation_refinement_config.euler_angles_offsets
 
         # The best defocus values for each particle (+ astigmatism)
-        defocus_u = self.particle_stack.defocus_u + self.particle_stack.defocus
-        defocus_v = self.particle_stack.defocus_v + self.particle_stack.defocus
-        defocus_angle = self.particle_stack.defocus_astigmatism_angle
+        defocus_u = self.particle_stack.absolute_defocus_u
+        defocus_v = self.particle_stack.absolute_defocus_v
+        defocus_angle = torch.tensor(self.particle_stack["astigmatism_angle"])
 
         # The relative defocus values to search over
         defocus_offsets = self.defocus_refinement_config.defocus_values
@@ -204,20 +204,20 @@ class RefineTemplateManager(BaseModel2DTM):
         # NOTE: We currently enforce the parameters (other than the defocus values) are
         # all the same. This could be updated in the future...
         part_stk = self.particle_stack
-        assert part_stk.pixel_size.unique().shape[0] == 1
-        assert part_stk.voltage.unique().shape[0] == 1
-        assert part_stk.spherical_aberration.unique().shape[0] == 1
-        assert part_stk.amplitude_contrast_ratio.unique().shape[0] == 1
-        assert part_stk.phase_shift.unique().shape[0] == 1
-        assert part_stk.ctf_B_factor.unique().shape[0] == 1
+        assert part_stk["pixel_size"].nunique() == 1
+        assert part_stk["voltage"].nunique() == 1
+        assert part_stk["spherical_aberration"].nunique() == 1
+        assert part_stk["amplitude_contrast_ratio"].nunique() == 1
+        assert part_stk["phase_shift"].nunique() == 1
+        assert part_stk["ctf_B_factor"].nunique() == 1
 
         ctf_kwargs = {
-            "voltage": part_stk.voltage[0].item(),
-            "spherical_aberration": part_stk.spherical_aberration[0].item(),
-            "amplitude_contrast": part_stk.amplitude_contrast_ratio[0].item(),
-            "b_factor": part_stk.ctf_B_factor[0].item(),
-            "phase_shift": part_stk.phase_shift[0].item(),
-            "pixel_size": part_stk.pixel_size[0].item(),
+            "voltage": part_stk["voltage"][0].item(),
+            "spherical_aberration": part_stk["spherical_aberration"][0].item(),
+            "amplitude_contrast": part_stk["amplitude_contrast_ratio"][0].item(),
+            "b_factor": part_stk["ctf_B_factor"][0].item(),
+            "phase_shift": part_stk["phase_shift"][0].item(),
+            "pixel_size": part_stk["pixel_size"][0].item(),
             "image_shape": template_shape,
             "rfft": True,
             "fftshift": False,
@@ -236,11 +236,46 @@ class RefineTemplateManager(BaseModel2DTM):
             "projective_filters": projective_filters,
         }
 
-    def run_refine_template(self, particle_batch_size: int = 64) -> None:
+    def run_refine_template(
+        self, output_dataframe_path: str, particle_batch_size: int = 64
+    ) -> None:
         """Run the refine template program."""
         backend_kwargs = self.make_backend_core_function_kwargs()
 
-        core_refine_template(batch_size=particle_batch_size, **backend_kwargs)
+        result = core_refine_template(batch_size=particle_batch_size, **backend_kwargs)
+        result = {k: v.cpu().numpy() for k, v in result.items()}
+
+        # Copy dataframe from particle stack and add results
+        df_refined = self.particle_stack._df.copy()
+
+        # Add the new columns to the DataFrame
+        df_refined["refined_mip"] = result["refined_cross_correlation"]
+        df_refined["refined_scaled_mip"] = None  # TODO: Add this via scaling
+        df_refined["refined_psi"] = result["refined_euler_angles"][:, 0]
+        df_refined["refined_theta"] = result["refined_euler_angles"][:, 1]
+        df_refined["refined_phi"] = result["refined_euler_angles"][:, 2]
+        df_refined["refined_relative_defocus"] = (
+            result["refined_defocus_offset"] + df_refined["relative_defocus"]
+        )
+        df_refined["refined_pos_y"] = result["refined_pos_y"] + df_refined["pos_y"]
+        df_refined["refined_pos_x"] = result["refined_pos_x"] + df_refined["pos_x"]
+        df_refined["refined_pos_y_img"] = (
+            result["refined_pos_y"] + df_refined["pos_y_img"]
+        )
+        df_refined["refined_pos_x_img"] = (
+            result["refined_pos_x"] + df_refined["pos_x_img"]
+        )
+        df_refined["refined_pos_y_img_angstrom"] = (
+            result["refined_pos_y"] * df_refined["pixel_size"]
+            + df_refined["pos_y_img_angstrom"]
+        )
+        df_refined["refined_pos_x_img_angstrom"] = (
+            result["refined_pos_x"] * df_refined["pixel_size"]
+            + df_refined["pos_x_img_angstrom"]
+        )
+
+        # Save the refined DataFrame to disk
+        df_refined.to_csv(output_dataframe_path)
 
     # def particles_to_dataframe(self) -> pd.DataFrame:
     #     """Export refined particles as dataframe."""

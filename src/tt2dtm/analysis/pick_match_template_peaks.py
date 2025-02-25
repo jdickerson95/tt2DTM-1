@@ -18,10 +18,10 @@ class MatchTemplatePeaks(NamedTuple):
     psi: torch.Tensor
     theta: torch.Tensor
     phi: torch.Tensor
-    defocus: torch.Tensor
-    corr_average: torch.Tensor
-    corr_variance: torch.Tensor
-    corr_total: int
+    relative_defocus: torch.Tensor
+    correlation_mean: torch.Tensor
+    correlation_variance: torch.Tensor
+    total_correlations: int
 
 
 def match_template_peaks_to_dict(peaks: MatchTemplatePeaks) -> dict:
@@ -158,7 +158,7 @@ def extract_peaks_and_statistics(
     best_phi : torch.Tensor
         Best phi angles for each pixel.
     best_defocus : torch.Tensor
-        Best defocus values for each pixel.
+        Best relative defocus values for each pixel.
     correlation_average : torch.Tensor
         Average correlation value for each pixel.
     correlation_variance : torch.Tensor
@@ -195,7 +195,7 @@ def extract_peaks_and_statistics(
     psi_peaks = best_psi[pos_y, pos_x]
     theta_peaks = best_theta[pos_y, pos_x]
     phi_peaks = best_phi[pos_y, pos_x]
-    defocus_peaks = best_defocus[pos_y, pos_x]
+    relative_defocus_peaks = best_defocus[pos_y, pos_x]
     correlation_average_peaks = correlation_average[pos_y, pos_x]
     correlation_variance_peaks = correlation_variance[pos_y, pos_x]
 
@@ -207,8 +207,8 @@ def extract_peaks_and_statistics(
         psi=psi_peaks,
         theta=theta_peaks,
         phi=phi_peaks,
-        defocus=defocus_peaks,
-        corr_average=correlation_average_peaks,
-        corr_variance=correlation_variance_peaks,
-        corr_total=total_correlation_positions,
+        relative_defocus=relative_defocus_peaks,
+        correlation_mean=correlation_average_peaks,
+        correlation_variance=correlation_variance_peaks,
+        total_correlations=total_correlation_positions,
     )

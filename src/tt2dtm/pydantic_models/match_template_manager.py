@@ -193,7 +193,7 @@ class MatchTemplateManager(BaseModel2DTM):
             template_shape=(template_shape[0], template_shape[0]),
             defocus_u=self.optics_group.defocus_u * 1e-4,  # A to um
             defocus_v=self.optics_group.defocus_v * 1e-4,  # A to um
-            astigmatism_angle=self.optics_group.defocus_astigmatism_angle,
+            astigmatism_angle=self.optics_group.astigmatism_angle,
             defocus_min=self.defocus_search_config.defocus_min * 1e-4,  # A to um
             defocus_max=self.defocus_search_config.defocus_max * 1e-4,  # A to um
             defocus_step=self.defocus_search_config.defocus_step * 1e-4,  # A to um
@@ -314,6 +314,10 @@ class MatchTemplateManager(BaseModel2DTM):
         else:
             self.match_template_result.locate_peaks(**locate_peaks_kwargs)
 
+        # DataFrame comes with the following columns :
+        # ['mip', 'scaled_mip', 'correlation_mean', 'correlation_variance',
+        # 'total_correlations'. 'pos_y', 'pos_x', 'psi', 'theta', 'phi',
+        # 'relative_defocus', ]
         df = self.match_template_result.peaks_to_dataframe()
 
         # DataFrame currently contains pixel coordinates for results. Coordinates in
@@ -322,26 +326,32 @@ class MatchTemplateManager(BaseModel2DTM):
         # NOTE: We are assuming the template is cubic
         nx = mrcfile.open(self.template_volume_path).header.nx
         if half_template_width_pos_shift:
-            df["img_pos_y"] = df["pos_y"] + nx // 2
-            df["img_pos_x"] = df["pos_x"] + nx // 2
+            df["pos_y_img"] = df["pos_y"] + nx // 2
+            df["pos_x_img"] = df["pos_x"] + nx // 2
         else:
-            df["img_pos_y"] = df["pos_y"]
-            df["img_pos_x"] = df["pos_x"]
+            df["pos_y_img"] = df["pos_y"]
+            df["pos_x_img"] = df["pos_x"]
 
         # Also, the positions are in terms of pixels. Also add columns for particle
         # positions in terms of Angstroms.
         pixel_size = self.optics_group.pixel_size
-        df["img_pos_y_angstrom"] = df["img_pos_y"] * pixel_size
-        df["img_pos_x_angstrom"] = df["img_pos_x"] * pixel_size
+        df["pos_y_img_angstrom"] = df["pos_y_img"] * pixel_size
+        df["pos_x_img_angstrom"] = df["pos_x_img"] * pixel_size
 
-        # Add absolute defocus values and other imaging parameters
+        # Add microscope (CTF) parameters
         df["defocus_u"] = self.optics_group.defocus_u
         df["defocus_v"] = self.optics_group.defocus_v
-        df["defocus_astigmatism_angle"] = self.optics_group.defocus_astigmatism_angle
+        df["astigmatism_angle"] = self.optics_group.astigmatism_angle
+        df["pixel_size"] = pixel_size
+        df["voltage"] = self.optics_group.voltage
+        df["spherical_aberration"] = self.optics_group.spherical_aberration
+        df["amplitude_contrast_ratio"] = self.optics_group.amplitude_contrast_ratio
+        df["phase_shift"] = self.optics_group.phase_shift
+        df["ctf_B_factor"] = self.optics_group.ctf_B_factor
 
         # Add paths to the micrograph and reference template
-        df["reference_micrograph"] = self.micrograph_path
-        df["reference_template"] = self.template_volume_path
+        df["micrograph_path"] = self.micrograph_path
+        df["template_path"] = self.template_volume_path
 
         # Add paths to the output statistic files
         df["mip_path"] = self.match_template_result.mip_path
@@ -356,13 +366,6 @@ class MatchTemplateManager(BaseModel2DTM):
         df["correlation_variance_path"] = (
             self.match_template_result.correlation_variance_path
         )
-
-        df["pixel_size"] = pixel_size
-        df["voltage"] = self.optics_group.voltage
-        df["spherical_aberration"] = self.optics_group.spherical_aberration
-        df["amplitude_contrast_ratio"] = self.optics_group.amplitude_contrast_ratio
-        df["phase_shift"] = self.optics_group.phase_shift
-        df["ctf_B_factor"] = self.optics_group.ctf_B_factor
 
         # Drop columns if requested
         if exclude_columns is not None:

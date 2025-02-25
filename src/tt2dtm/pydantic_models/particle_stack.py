@@ -93,15 +93,15 @@ class ParticleStack(BaseModel2DTM):
         image_stack = torch.zeros((self.num_particles, *self.extracted_box_size))
 
         # Find the indexes in the DataFrame that correspond to each unique image
-        image_index_groups = self._df.groupby("reference_micrograph").groups
+        image_index_groups = self._df.groupby("micrograph_path").groups
 
         # Loop over each unique image and extract the particles
         for img_path, indexes in image_index_groups.items():
             img = load_mrc_image(img_path)
 
             # with reference to center pixel
-            pos_y = self._df.loc[indexes, "img_pos_y"]
-            pos_x = self._df.loc[indexes, "img_pos_x"]
+            pos_y = self._df.loc[indexes, "pos_y_img"]
+            pos_x = self._df.loc[indexes, "pos_x_img"]
             pos_y = torch.tensor(pos_y)
             pos_x = torch.tensor(pos_x)
 
@@ -201,7 +201,7 @@ class ParticleStack(BaseModel2DTM):
         filter_stack = torch.zeros((self.num_particles, *output_shape))
 
         # Find the indexes in the DataFrame that correspond to each unique image
-        image_index_groups = self._df.groupby("reference_micrograph").groups
+        image_index_groups = self._df.groupby("micrograph_path").groups
 
         # Loop over each unique image and extract the particles
         for img_path, indexes in image_index_groups.items():
@@ -224,121 +224,18 @@ class ParticleStack(BaseModel2DTM):
         return len(self._df)
 
     @property
-    def pos_y(self) -> torch.Tensor:
-        """Access the y-coordinate values in the underlying DataFrame."""
-        return torch.tensor(self._df["pos_y"].values)
+    def absolute_defocus_u(self) -> torch.Tensor:
+        """Get the absolute defocus along the major axis."""
+        return torch.tensor(self._df["defocus_u"] + self._df["relative_defocus"])
 
     @property
-    def pos_x(self) -> torch.Tensor:
-        """Access the x-coordinate values in the underlying DataFrame."""
-        return torch.tensor(self._df["pos_x"].values)
+    def absolute_defocus_v(self) -> torch.Tensor:
+        """Get the absolute defocus along the minor axis."""
+        return torch.tensor(self._df["defocus_v"] + self._df["relative_defocus"])
 
-    @property
-    def mip(self) -> torch.Tensor:
-        """Access the MIP values in the underlying DataFrame."""
-        return torch.tensor(self._df["mip"].values)
-
-    @property
-    def scaled_mip(self) -> torch.Tensor:
-        """Access the scaled MIP values in the underlying DataFrame."""
-        return torch.tensor(self._df["scaled_mip"].values)
-
-    @property
-    def psi(self) -> torch.Tensor:
-        """Access the psi values in the underlying DataFrame."""
-        return torch.tensor(self._df["psi"].values)
-
-    @property
-    def theta(self) -> torch.Tensor:
-        """Access the theta values in the underlying DataFrame."""
-        return torch.tensor(self._df["theta"].values)
-
-    @property
-    def phi(self) -> torch.Tensor:
-        """Access the phi values in the underlying DataFrame."""
-        return torch.tensor(self._df["phi"].values)
-
-    @property
-    def defocus(self) -> torch.Tensor:
-        """Access the defocus values in the underlying DataFrame."""
-        return torch.tensor(self._df["defocus"].values)
-
-    @property
-    def corr_average(self) -> torch.Tensor:
-        """Access the average correlation values in the underlying DataFrame."""
-        return torch.tensor(self._df["corr_average"].values)
-
-    @property
-    def corr_variance(self) -> torch.Tensor:
-        """Access the variance of correlation values in the underlying DataFrame."""
-        return torch.tensor(self._df["corr_variance"].values)
-
-    @property
-    def corr_total(self) -> torch.Tensor:
-        """Access the total correlation values in the underlying DataFrame."""
-        return torch.tensor(self._df["corr_total"].values)
-
-    @property
-    def img_pos_y(self) -> torch.Tensor:
-        """Access the y-coordinate values (for image) in the underlying DataFrame."""
-        return torch.tensor(self._df["img_pos_y"].values)
-
-    @property
-    def img_pos_x(self) -> torch.Tensor:
-        """Access the x-coordinate values (for image) in the underlying DataFrame."""
-        return torch.tensor(self._df["img_pos_x"].values)
-
-    @property
-    def img_pos_y_angstrom(self) -> torch.Tensor:
-        """Access the y-coordinate values (for image) in the underlying DataFrame."""
-        return torch.tensor(self._df["img_pos_y_angstrom"].values)
-
-    @property
-    def img_pos_x_angstrom(self) -> torch.Tensor:
-        """Access the x-coordinate values (for image) in the underlying DataFrame."""
-        return torch.tensor(self._df["img_pos_x_angstrom"].values)
-
-    @property
-    def defocus_u(self) -> torch.Tensor:
-        """Access the defocus_u values in the underlying DataFrame."""
-        return torch.tensor(self._df["defocus_u"].values)
-
-    @property
-    def defocus_v(self) -> torch.Tensor:
-        """Access the defocus_v values in the underlying DataFrame."""
-        return torch.tensor(self._df["defocus_v"].values)
-
-    @property
-    def defocus_astigmatism_angle(self) -> torch.Tensor:
-        """Access the defocus_astigmatism_angle values in the underlying DataFrame."""
-        return torch.tensor(self._df["defocus_astigmatism_angle"].values)
-
-    @property
-    def pixel_size(self) -> torch.Tensor:
-        """Access the pixel_size values in the underlying DataFrame."""
-        return torch.tensor(self._df["pixel_size"].values)
-
-    @property
-    def voltage(self) -> torch.Tensor:
-        """Access the voltage values in the underlying DataFrame."""
-        return torch.tensor(self._df["voltage"].values)
-
-    @property
-    def spherical_aberration(self) -> torch.Tensor:
-        """Access the spherical_aberration values in the underlying DataFrame."""
-        return torch.tensor(self._df["spherical_aberration"].values)
-
-    @property
-    def amplitude_contrast_ratio(self) -> torch.Tensor:
-        """Access the amplitude_contrast_ratio values in the underlying DataFrame."""
-        return torch.tensor(self._df["amplitude_contrast_ratio"].values)
-
-    @property
-    def phase_shift(self) -> torch.Tensor:
-        """Access the phase_shift values in the underlying DataFrame."""
-        return torch.tensor(self._df["phase_shift"].values)
-
-    @property
-    def ctf_B_factor(self) -> torch.Tensor:
-        """Access the ctf_B_factor values in the underlying DataFrame."""
-        return torch.tensor(self._df["ctf_B_factor"].values)
+    def __getitem__(self, key: str) -> Any:
+        """Get an item from the DataFrame."""
+        try:
+            return self._df[key]
+        except KeyError as err:
+            raise KeyError(f"Key '{key}' not found in underlying DataFrame.") from err

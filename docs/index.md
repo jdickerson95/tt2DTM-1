@@ -56,7 +56,7 @@ my_optics_group = OpticsGroup(
     voltage=300,       # In kV
     defocus_u=5100.0,  # In Angstroms
     defocus_v=4900.0,  # In Angstroms
-    defocus_astigmatism_angle=0.0,  # In degrees
+    astigmatism_angle=0.0,  # In degrees
 )
 
 # Relative defocus planes to search across

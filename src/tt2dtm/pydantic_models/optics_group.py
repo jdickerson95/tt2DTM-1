@@ -35,7 +35,7 @@ class OpticsGroup(BaseModel2DTM):
         Defocus (underfocus) along the major axis in Angstrom.
     defocus_v : float
         Defocus (underfocus) along the minor axis in Angstrom.
-    defocus_astigmatism_angle : float
+    astigmatism_angle : float
         Angle of defocus astigmatism relative to the X-axis in degrees.
     ctf_B_factor : float
         B-factor to apply in the contrast transfer function in A^2. Default
@@ -78,7 +78,7 @@ class OpticsGroup(BaseModel2DTM):
     phase_shift: Annotated[float, Field(default=0.0)] = 0.0
     defocus_u: float
     defocus_v: float
-    defocus_astigmatism_angle: float
+    astigmatism_angle: float
     ctf_B_factor: Annotated[float, Field(ge=0.0, default=0.0)] = 0.0
 
     chromatic_aberration: Optional[Annotated[float, Field(ge=0.0)]] = 0.0
