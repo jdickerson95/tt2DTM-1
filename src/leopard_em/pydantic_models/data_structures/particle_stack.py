@@ -614,6 +614,45 @@ class ParticleStack(BaseModel2DTM):
 
         return torch.stack((phi, theta, psi), dim=-1)
 
+    def get_positions(
+        self, prefer_refined_positions: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the particle positions (x, y) of all particles as tensors.
+
+        Parameters
+        ----------
+        prefer_refined_positions : bool, optional
+            When true, the refined positions are used (columns prefixed with
+            'refined_'), otherwise the original positions are used, by default True.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            A tuple of tensors (pos_x, pos_y) where each is of shape (N,) and N is
+            the number of particles.
+        """
+        # Determine which position columns to use
+        pos_x_col = "pos_x"
+        pos_y_col = "pos_y"
+
+        if prefer_refined_positions:
+            if not all(
+                x in self._df.columns for x in ["refined_pos_x", "refined_pos_y"]
+            ):
+                warnings.warn(
+                    "Refined pos not found in DataFrame, using original pos...",
+                    stacklevel=2,
+                )
+            else:
+                pos_x_col = "refined_pos_x"
+                pos_y_col = "refined_pos_y"
+
+        # Get the positions from the DataFrame
+        pos_x = torch.tensor(self._df[pos_x_col].to_numpy())
+        pos_y = torch.tensor(self._df[pos_y_col].to_numpy())
+
+        return pos_x, pos_y
+
     def __getitem__(self, key: str) -> Any:
         """Get an item from the DataFrame."""
         try:
