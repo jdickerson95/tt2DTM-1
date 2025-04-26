@@ -122,6 +122,12 @@ def extract_and_process_projection(
     # Extract template dimensions from the template_dft tensor
     _, template_h, template_w_half = template_dft.shape
 
+    # Ensure all tensors are on the same device as rot_matrix
+    device = rot_matrix.device
+    template_dft = template_dft.to(device)
+    ctf_filter = ctf_filter.to(device)
+    proj_filter = proj_filter.to(device)
+
     # Extract Fourier slice from the template
     # Input: template_dft (d, h, w//2+1), rot_matrix (1, 3, 3)
     # Output: fourier_slice (1, h, w//2+1)
@@ -210,6 +216,17 @@ def core_signal_subtract(
     # Choose first device for operations
     primary_device = device[0]
 
+    # Move all tensors to the primary device
+    image_dft = image_dft.to(primary_device)
+    template_dft = template_dft.to(primary_device)
+    projective_filters = projective_filters.to(primary_device)
+    defocus_u = defocus_u.to(primary_device)
+    defocus_v = defocus_v.to(primary_device)
+    defocus_angle = defocus_angle.to(primary_device)
+    euler_angles = euler_angles.to(primary_device)
+    positions_x = positions_x.to(primary_device)
+    positions_y = positions_y.to(primary_device)
+
     # Convert image back to real space for subtraction
     # image_dft (H, W//2+1) -> image (H, W)
     image = torch.fft.irfftn(image_dft)
@@ -235,8 +252,12 @@ def core_signal_subtract(
         defocus_u=defocus_u,  # in Angstrom
         defocus_v=defocus_v,  # in Angstrom
         astigmatism_angle=defocus_angle,  # in degrees
-        defocus_offsets=torch.tensor([0.0]),  # no offset for subtraction
-        pixel_size_offsets=torch.tensor([0.0]),  # no offset for subtraction
+        defocus_offsets=torch.tensor(
+            [0.0], device=primary_device
+        ),  # no offset for subtraction
+        pixel_size_offsets=torch.tensor(
+            [0.0], device=primary_device
+        ),  # no offset for subtraction
         **ctf_kwargs,
     )
 
