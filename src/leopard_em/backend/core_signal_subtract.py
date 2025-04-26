@@ -120,13 +120,14 @@ def extract_and_process_projection(
         The processed and normalized projection. Shape (1, h, w).
     """
     # Extract template dimensions from the template_dft tensor
-    _, template_h, template_w_half = template_dft.shape
+    _, template_h, _ = template_dft.shape
 
-    # Ensure all tensors are on the same device as rot_matrix
+    # Ensure all tensors are on the same device
     device = rot_matrix.device
-    template_dft = template_dft.to(device)
-    ctf_filter = ctf_filter.to(device)
-    proj_filter = proj_filter.to(device)
+    template_dft = template_dft.to(device, dtype=torch.float32)
+    ctf_filter = ctf_filter.to(device, dtype=torch.float32)
+    proj_filter = proj_filter.to(device, dtype=torch.float32)
+    rot_matrix = rot_matrix.to(device, dtype=torch.float32)
 
     # Extract Fourier slice from the template
     # Input: template_dft (d, h, w//2+1), rot_matrix (1, 3, 3)
@@ -216,16 +217,18 @@ def core_signal_subtract(
     # Choose first device for operations
     primary_device = device[0]
 
-    # Move all tensors to the primary device
-    image_dft = image_dft.to(primary_device)
-    template_dft = template_dft.to(primary_device)
-    projective_filters = projective_filters.to(primary_device)
-    defocus_u = defocus_u.to(primary_device)
-    defocus_v = defocus_v.to(primary_device)
-    defocus_angle = defocus_angle.to(primary_device)
-    euler_angles = euler_angles.to(primary_device)
-    positions_x = positions_x.to(primary_device)
-    positions_y = positions_y.to(primary_device)
+    # Move all tensors to the primary device and ensure they're float32
+    image_dft = image_dft.to(
+        primary_device, dtype=torch.complex64
+    )  # Complex tensor - use complex64 for float32 precision
+    template_dft = template_dft.to(primary_device, dtype=torch.complex64)
+    projective_filters = projective_filters.to(primary_device, dtype=torch.float32)
+    defocus_u = defocus_u.to(primary_device, dtype=torch.float32)
+    defocus_v = defocus_v.to(primary_device, dtype=torch.float32)
+    defocus_angle = defocus_angle.to(primary_device, dtype=torch.float32)
+    euler_angles = euler_angles.to(primary_device, dtype=torch.float32)
+    positions_x = positions_x.to(primary_device, dtype=torch.float32)
+    positions_y = positions_y.to(primary_device, dtype=torch.float32)
 
     # Convert image back to real space for subtraction
     # image_dft (H, W//2+1) -> image (H, W)
@@ -253,10 +256,10 @@ def core_signal_subtract(
         defocus_v=defocus_v,  # in Angstrom
         astigmatism_angle=defocus_angle,  # in degrees
         defocus_offsets=torch.tensor(
-            [0.0], device=primary_device
+            [0.0], device=primary_device, dtype=torch.float32
         ),  # no offset for subtraction
         pixel_size_offsets=torch.tensor(
-            [0.0], device=primary_device
+            [0.0], device=primary_device, dtype=torch.float32
         ),  # no offset for subtraction
         **ctf_kwargs,
     )
