@@ -98,8 +98,7 @@ def calculate_valid_regions(
 def extract_and_process_projection(
     template_dft: torch.Tensor,
     rot_matrix: torch.Tensor,
-    ctf_filter: torch.Tensor,
-    proj_filter: torch.Tensor,
+    combined_filter: torch.Tensor,
 ) -> torch.Tensor:
     """Extract and process a projection from the template.
 
@@ -109,10 +108,8 @@ def extract_and_process_projection(
         The template volume in Fourier space. Shape (d, h, w//2+1).
     rot_matrix : torch.Tensor
         The rotation matrix to use for the projection. Shape (1, 3, 3).
-    ctf_filter : torch.Tensor
-        The CTF filter to apply to the projection. Shape (1, 1, h, w//2+1).
-    proj_filter : torch.Tensor
-        The projective filter to apply to the projection. Shape (1, h, w//2+1).
+    combined_filter : torch.Tensor
+        The combined filter to apply to the projection. Shape (1, 1, h, w//2+1).
 
     Returns
     -------
@@ -125,8 +122,7 @@ def extract_and_process_projection(
     # Ensure all tensors are on the same device
     device = rot_matrix.device
     template_dft = template_dft.to(device, dtype=torch.float32)
-    ctf_filter = ctf_filter.to(device, dtype=torch.float32)
-    proj_filter = proj_filter.to(device, dtype=torch.float32)
+    combined_filter = combined_filter.to(device, dtype=torch.float32)
     rot_matrix = rot_matrix.to(device, dtype=torch.float32)
 
     # Extract Fourier slice from the template
@@ -145,17 +141,12 @@ def extract_and_process_projection(
     fourier_slice *= -1  # flip contrast
 
     # Apply combined filters
-    # ctf_filter: (1, 1, h, w//2+1), proj_filter: (1, h, w//2+1)
-    # Combined shape after broadcasting: (1, h, w//2+1)
-    combined_filter = proj_filter * ctf_filter
-    fourier_slice *= combined_filter
+    fourier_slice = combined_filter * fourier_slice[None, None, ...]
 
     # Convert to real space
-    # fourier_slice (1, h, w//2+1) -> projection (1, h, w)
     projection = torch.fft.irfftn(fourier_slice, dim=(-2, -1))
     projection = torch.fft.ifftshift(projection, dim=(-2, -1))
 
-    # Normalize the projection - input/output shape: (1, h, w)
     normalized_projection = normalize_projection(projection)
 
     return normalized_projection
@@ -244,25 +235,10 @@ def core_signal_subtract(
     template_w = 2 * (template_w - 1)  # Convert from Fourier to real space width
 
     # Create rotation matrices from Euler angles
-    # euler_angles (N, 3) -> rotation_matrices (N, 3, 3)
-    rotation_matrices = roma.euler_to_rotmat(
-        EULER_ANGLE_FMT, euler_angles, degrees=True, device=primary_device
-    )
 
-    # Calculate CTF filters for all particles at once
-    # Output shape: (N, 1, h, w//2+1)
-    ctf_filters = calculate_ctf_filter_stack_full_args(
-        defocus_u=defocus_u,  # in Angstrom
-        defocus_v=defocus_v,  # in Angstrom
-        astigmatism_angle=defocus_angle,  # in degrees
-        defocus_offsets=torch.tensor(
-            [0.0], device=primary_device, dtype=torch.float32
-        ),  # no offset for subtraction
-        pixel_size_offsets=torch.tensor(
-            [0.0], device=primary_device, dtype=torch.float32
-        ),  # no offset for subtraction
-        **ctf_kwargs,
-    )
+
+
+
 
     num_particles = len(positions_x)
 
@@ -279,21 +255,35 @@ def core_signal_subtract(
 
         # Get current particle's rotation matrix
         # (3, 3) -> (1, 3, 3) - Add batch dim for extract_central_slices_rfft_3d
-        rot_matrix = rotation_matrices[i].unsqueeze(0)
+        #rot_matrix = rotation_matrices[i].unsqueeze(0)
+        # euler_angles (N, 3) -> rotation_matrices (N, 3, 3)
+        rot_matrix = roma.euler_to_rotmat(
+            EULER_ANGLE_FMT, euler_angles[i, :], degrees=True, device=primary_device
+        )
+        rot_matrix = rot_matrix.to(torch.float32)
 
-        # Get the CTF filter for this particle - shape: (1, 1, h, w//2+1)
-        ctf_filter = ctf_filters[i]
+        ctf_filters = calculate_ctf_filter_stack_full_args(
+            defocus_u=defocus_u[i],  # in Angstrom
+            defocus_v=defocus_v[i],  # in Angstrom
+            astigmatism_angle=defocus_angle[i],  # in degrees
+            defocus_offsets=torch.tensor(
+                [0.0], device=primary_device, dtype=torch.float32
+            ),  # no offset for subtraction
+            pixel_size_offsets=torch.tensor(
+            [0.0], device=primary_device, dtype=torch.float32
+            ),  # no offset for subtraction
+            **ctf_kwargs,
+        )
 
-        # Get the projective filter for this particle
-        # (h, w//2+1) -> (1, h, w//2+1) - Add batch dim to match fourier_slice
-        proj_filter = projective_filters[i].unsqueeze(0)
+        # Combine the single projective filter with the CTF filter
+        combined_projective_filter = projective_filters[i][None, None, ...] * ctf_filters
+
 
         # Extract and process the projection - Output: (1, h, w)
         projection = extract_and_process_projection(
             template_dft=template_dft,
             rot_matrix=rot_matrix,
-            ctf_filter=ctf_filter,
-            proj_filter=proj_filter,
+            combined_filter=combined_projective_filter,
         )
 
         # Calculate valid regions for boundary-safe subtraction
@@ -305,9 +295,8 @@ def core_signal_subtract(
         )
 
         # Subtract the projection from the image
-        # projection[0]: (h, w) - access first (and only) batch element
         subtracted_image[img_y_slice, img_x_slice] -= projection[
-            0, proj_y_slice, proj_x_slice
+            0, 0, proj_y_slice, proj_x_slice
         ]
 
     return subtracted_image
