@@ -14,6 +14,7 @@ from leopard_em.pydantic_models.config import (
     DefocusSearchConfig,
     OrientationSearchConfig,
     PreprocessingFilters,
+    AutocorrelationConfig,
 )
 from leopard_em.pydantic_models.custom_types import BaseModel2DTM, ExcludedTensor
 from leopard_em.pydantic_models.data_structures import OpticsGroup
@@ -55,6 +56,8 @@ class MatchTemplateManager(BaseModel2DTM):
         `MatchTemplateResult` class.
     computational_config : ComputationalConfig
         Parameters for controlling computational resources.
+    autocorrelation_config : AutocorrelationConfig
+        Parameters for controlling autocorrelation search.
 
     Methods
     -------
@@ -95,6 +98,7 @@ class MatchTemplateManager(BaseModel2DTM):
     preprocessing_filters: PreprocessingFilters
     match_template_result: MatchTemplateResult
     computational_config: ComputationalConfig
+    autocorrelation_config: AutocorrelationConfig
 
     # Non-serialized large array-like attributes
     micrograph: ExcludedTensor
@@ -197,6 +201,12 @@ class MatchTemplateManager(BaseModel2DTM):
         euler_angles = euler_angles.to(torch.float32)
 
         template_dft = volume_to_rfft_fourier_slice(template)
+        template_dft = template_dft.to(torch.complex64)
+
+        autocorrelation_dft = None
+        if self.autocorrelation_config.enabled:
+            autocorrelation_map = load_mrc_volume(self.autocorrelation_config.autocorrelation_map)
+            autocorrelation_dft = volume_to_rfft_fourier_slice(autocorrelation_map)
 
         return {
             "image_dft": image_preprocessed_dft,
@@ -207,6 +217,8 @@ class MatchTemplateManager(BaseModel2DTM):
             "defocus_values": defocus_values,
             "pixel_values": pixel_size_offsets,
             "device": self.computational_config.gpu_devices,
+            "auto_correlate": self.autocorrelation_config.enabled,
+            "autocorrelation_dft": autocorrelation_dft,
         }
 
     def run_match_template(

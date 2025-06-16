@@ -53,6 +53,8 @@ def core_match_template(
     pixel_values: torch.Tensor,
     euler_angles: torch.Tensor,
     device: torch.device | list[torch.device],
+    auto_correlate: bool = False,
+    autocorrelation_dft: torch.Tensor | None = None,
     orientation_batch_size: int = 1,
 ) -> dict[str, torch.Tensor]:
     """Core function for performing the whole-orientation search.
@@ -87,6 +89,10 @@ def core_match_template(
         (pixel_size_batch,).
     device : torch.device | list[torch.device]
         Device or devices to split computation across.
+    auto_correlate : bool, optional
+        Whether to calculate the autocorrelation of the projections.
+    autocorrelation_dft : torch.Tensor | None, optional
+        Autocorrelation volume. Has shape (l, h, w // 2 + 1).
     orientation_batch_size : int, optional
         Number of projections to calculate at once, on each device
 
@@ -132,6 +138,8 @@ def core_match_template(
         pixel_values=pixel_values,
         orientation_batch_size=orientation_batch_size,
         devices=device,
+        auto_correlate=auto_correlate,
+        autocorrelation_dft=autocorrelation_dft,
     )
 
     result_dict = run_multiprocess_jobs(
@@ -184,6 +192,8 @@ def construct_multi_gpu_match_template_kwargs(
     pixel_values: torch.Tensor,
     orientation_batch_size: int,
     devices: list[torch.device],
+    auto_correlate: bool = False,
+    autocorrelation_dft: torch.Tensor | None = None,
 ) -> list[dict[str, torch.Tensor | int]]:
     """Split orientations between requested devices.
 
@@ -208,6 +218,10 @@ def construct_multi_gpu_match_template_kwargs(
         number of projections to calculate at once
     devices : list[torch.device]
         list of devices to split the orientations across
+    auto_correlate : bool, optional
+        Whether to calculate the autocorrelation of the projections.
+    autocorrelation_dft : torch.Tensor | None, optional
+        Autocorrelation volume. Has shape (l, h, w // 2 + 1).
 
     Returns
     -------
@@ -231,6 +245,8 @@ def construct_multi_gpu_match_template_kwargs(
             "defocus_values": defocus_values.to(device),
             "pixel_values": pixel_values.to(device),
             "orientation_batch_size": orientation_batch_size,
+            "auto_correlate": auto_correlate,
+            "autocorrelation_dft": autocorrelation_dft.to(device) if autocorrelation_dft is not None else None,
         }
 
         kwargs_per_device.append(kwargs)
@@ -249,6 +265,8 @@ def _core_match_template_single_gpu(
     defocus_values: torch.Tensor,
     pixel_values: torch.Tensor,
     orientation_batch_size: int,
+    auto_correlate: bool = False,
+    autocorrelation_dft: torch.Tensor | None = None,
 ) -> None:
     """Single-GPU call for template matching.
 
@@ -287,6 +305,10 @@ def _core_match_template_single_gpu(
         (pixel_size_batch,).
     orientation_batch_size : int
         The number of projections to calculate the correlation for at once.
+    auto_correlate : bool, optional
+        Whether to calculate the autocorrelation of the projections.
+    autocorrelation_dft : torch.Tensor | None, optional
+        Autocorrelation volume. Has shape (l, h, w // 2 + 1).
 
     Returns
     -------
@@ -360,6 +382,22 @@ def _core_match_template_single_gpu(
         euler_angles.shape[0] * defocus_values.shape[0] * pixel_values.shape[0]
     )
 
+    if auto_correlate:
+        cross_correlation_fn = _do_bached_orientation_auto_correlate
+        args = (
+            image_dft,
+            template_dft,
+            projective_filters,
+            autocorrelation_dft,
+        )
+    else:
+        cross_correlation_fn = _do_bached_orientation_cross_correlate
+        args = (
+            image_dft,
+            template_dft,
+            projective_filters,
+        )
+
     ##################################
     ### Start the orientation loop ###
     ##################################
@@ -372,12 +410,7 @@ def _core_match_template_single_gpu(
             "ZYZ", euler_angles_batch, degrees=True, device=device
         )
 
-        cross_correlation = _do_bached_orientation_cross_correlate(
-            image_dft=image_dft,
-            template_dft=template_dft,
-            rotation_matrices=rot_matrix,
-            projective_filters=projective_filters,
-        )
+        cross_correlation = cross_correlation_fn(*args, rotation_matrices=rot_matrix)
 
         # Update the tracked statistics through compiled function
         do_iteration_statistics_updates_compiled(
@@ -419,8 +452,8 @@ def _core_match_template_single_gpu(
 def _do_bached_orientation_cross_correlate(
     image_dft: torch.Tensor,
     template_dft: torch.Tensor,
-    rotation_matrices: torch.Tensor,
     projective_filters: torch.Tensor,
+    rotation_matrices: torch.Tensor,
 ) -> torch.Tensor:
     """Batched projection and cross-correlation with fixed (batched) filters.
 
@@ -436,12 +469,12 @@ def _do_bached_orientation_cross_correlate(
         Real-fourier transform (RFFT) of the template volume to take Fourier
         slices from. Has shape (l, h, w // 2 + 1). where l is the number of
         slices.
-    rotation_matrices : torch.Tensor
-        Rotation matrices to apply to the template volume. Has shape
-        (orientations, 3, 3).
     projective_filters : torch.Tensor
         Multiplied 'ctf_filters' with 'whitening_filter_template'. Has shape
         (defocus_batch, h, w // 2 + 1). Is RFFT and not fftshifted.
+    rotation_matrices : torch.Tensor
+        Rotation matrices to apply to the template volume. Has shape
+        (orientations, 3, 3).
 
     Returns
     -------
@@ -481,6 +514,148 @@ def _do_bached_orientation_cross_correlate(
 
     # Cross correlation step by element-wise multiplication
     projections_dft = image_dft[None, None, None, ...] * projections_dft.conj()
+    cross_correlation = torch.fft.irfftn(projections_dft, dim=(-2, -1))
+
+    # shape is (n_Cs n_defoc n_orientations, H, W)
+    return cross_correlation
+
+def _do_bached_orientation_auto_correlate(
+    image_dft: torch.Tensor,
+    template_dft: torch.Tensor,
+    projective_filters: torch.Tensor,
+    autocorrelation_model_dft: torch.Tensor,
+    rotation_matrices: torch.Tensor,
+) -> torch.Tensor:
+    """Batched projection and cross-correlation with fixed (batched) filters.
+
+    Note that this function returns a cross-correlogram with "same" mode (i.e. the
+    same size as the input image). See numpy correlate docs for more information.
+
+    Parameters
+    ----------
+    image_dft : torch.Tensor
+        Real-fourier transform (RFFT) of the image with large image filters
+        already applied. Has shape (H, W // 2 + 1).
+    template_dft : torch.Tensor
+        Real-fourier transform (RFFT) of the template volume to take Fourier
+        slices from. Has shape (l, h, w // 2 + 1). where l is the number of
+        slices.
+    projective_filters : torch.Tensor
+        Multiplied 'ctf_filters' with 'whitening_filter_template'. Has shape
+        (defocus_batch, h, w // 2 + 1). Is RFFT and not fftshifted.
+    autocorrelation_model_dft : torch.Tensor
+        Autocorrelation model volume. Has shape (l, h, w // 2 + 1).
+    rotation_matrices : torch.Tensor
+        Rotation matrices to apply to the template volume. Has shape
+        (orientations, 3, 3).
+
+    Returns
+    -------
+    torch.Tensor
+        Cross-correlation of the image with the template volume for each
+        orientation and defocus value. Will have shape
+        (orientations, defocus_batch, H, W).
+    """
+    # Accounting for RFFT shape
+    projection_shape_real = (template_dft.shape[1], template_dft.shape[2] * 2 - 2)
+    image_shape_real = (image_dft.shape[0], image_dft.shape[1] * 2 - 2)
+
+    # Extract central slice(s) from the template volume
+    fourier_slice = extract_central_slices_rfft_3d(
+        volume_rfft=template_dft,
+        image_shape=(projection_shape_real[0],) * 3,  # NOTE: requires cubic template
+        rotation_matrices=rotation_matrices,
+    )
+    fourier_slice = torch.fft.ifftshift(fourier_slice, dim=(-2,))
+    fourier_slice[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+    fourier_slice *= -1  # flip contrast
+
+    # Apply the projective filters on a new batch dimension
+    fourier_slice = fourier_slice[None, None, ...] * projective_filters[:, :, None, ...]
+    # Inverse Fourier transform into real space and normalize
+    projections = torch.fft.irfftn(fourier_slice, dim=(-2, -1))
+    projections = torch.fft.ifftshift(projections, dim=(-2, -1))
+    projections = normalize_template_projection_compiled(
+        projections,
+        projection_shape_real,
+        image_shape_real,
+    )
+
+    fourier_slice = extract_central_slices_rfft_3d(
+        volume_rfft=autocorrelation_model_dft,
+        image_shape=(projection_shape_real[0],) * 3,  # NOTE: requires cubic template
+        rotation_matrices=rotation_matrices,
+    )
+    fourier_slice = torch.fft.ifftshift(fourier_slice, dim=(-2,))
+    fourier_slice[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+    fourier_slice *= -1  # flip contrast
+    fourier_slice = fourier_slice[None, None, ...] * projective_filters[:, :, None, ...]
+    autocorrelation = torch.fft.irfftn(fourier_slice, dim=(-2, -1))
+    autocorrelation = torch.fft.ifftshift(autocorrelation, dim=(-2, -1))
+    autocorrelation_projections = normalize_template_projection_compiled(
+        autocorrelation,
+        projection_shape_real,
+        image_shape_real,
+    )
+
+        # Calculate the autocorrelation of the projections
+    autocorr_width = 256
+    autocorr_height = 256
+
+    # Pad with n zeros on each side
+    autocorrelation = torch.nn.functional.pad(
+        autocorrelation_projections,
+        (autocorr_width, autocorr_width, autocorr_height, autocorr_height),
+        mode="constant",
+        value=0,
+    )
+
+    # ### DEBUGGING ###
+    # import matplotlib.pyplot as plt
+
+    # print(projections.shape)
+    # print(autocorrelation.shape)
+
+    # plt.imshow(autocorrelation[0].cpu().numpy(), cmap="gray")
+    # plt.colorbar()
+    # plt.show()
+    # # raise ValueError("Debugging projection")
+    # ### END DEBUGGING ###
+
+    # Do the cross-correlation for the autocorrelation step
+    autocorrelation_dft = torch.fft.rfftn(autocorrelation, dim=(-2, -1))
+    autocorrelation_shape_real = (autocorrelation.shape[0], autocorrelation.shape[1] * 2 - 2)
+    projections_dft = torch.fft.rfftn(
+        projections, dim=(-2, -1), s=autocorrelation.shape[-2:]
+    )
+    projections_dft[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+
+    autocorrelation_dft *= projections_dft.conj()
+    autocorrelation = torch.fft.irfftn(autocorrelation_dft, dim=(-2, -1))
+    autocorrelation = autocorrelation[
+        ..., 0 : autocorr_height * 2 + 1, 0 : autocorr_width * 2 + 1
+    ]
+
+    # Normalize the autocorrelation
+    autocorrelation = normalize_template_projection_compiled(
+        autocorrelation, 
+        autocorrelation_shape_real, 
+        image_shape_real
+        )
+
+    #var, mean = torch.var_mean(autocorrelation, dim=(-2, -1), keepdim=True)
+    #autocorrelation = (autocorrelation - mean) / torch.sqrt(var)
+
+    # Padded forward Fourier transform for cross-correlation
+    projections_dft = torch.fft.rfftn(projections, dim=(-2, -1), s=image_shape_real)
+    projections_dft[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+
+    autocorrelation_dft = torch.fft.rfftn(autocorrelation, dim=(-2, -1), s=image_shape_real)
+    autocorrelation_dft[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+
+    # Cross correlation step by element-wise multiplication 
+    projections_dft = image_dft[None, None, None, ...] * projections_dft.conj()
+    projections_dft = projections_dft * autocorrelation_dft.conj()
     cross_correlation = torch.fft.irfftn(projections_dft, dim=(-2, -1))
 
     # shape is (n_Cs n_defoc n_orientations, H, W)

@@ -14,6 +14,7 @@ from .orientation_search import (
     OrientationSearchConfig,
     RefineOrientationConfig,
 )
+from .autocorrelation_config import AutocorrelationConfig
 from .pixel_size_search import PixelSizeSearchConfig
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "RefineOrientationConfig",
     "WhiteningFilterConfig",
     "ConstrainedOrientationConfig",
+    "AutocorrelationConfig",
 ]
