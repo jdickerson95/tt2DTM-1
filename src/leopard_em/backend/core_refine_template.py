@@ -14,6 +14,7 @@ from torch_fourier_slice import extract_central_slices_rfft_3d
 from leopard_em.backend.cross_correlation import (
     do_batched_orientation_cross_correlate,
     do_batched_orientation_cross_correlate_cpu,
+    do_orientation_frc,
 )
 from leopard_em.backend.utils import (
     normalize_template_projection,
@@ -63,6 +64,7 @@ def core_refine_template(
     device: torch.device | list[torch.device],
     batch_size: int = 32,
     num_cuda_streams: int = 1,
+    frc: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Core function to refine orientations and defoci of a set of particles.
 
@@ -107,6 +109,8 @@ def core_refine_template(
         The number of cross-correlations to process in one batch, defaults to 32.
     num_cuda_streams : int, optional
         Number of CUDA streams to use for parallel processing. Defaults to 1.
+    frc : bool, optional
+        Whether to run FRC instead of refine template. Defaults to False.
 
     Returns
     -------
@@ -137,6 +141,7 @@ def core_refine_template(
         batch_size=batch_size,
         devices=device,
         num_cuda_streams=num_cuda_streams,
+        frc=frc,
     )
 
     results = run_multiprocess_jobs(
@@ -224,6 +229,7 @@ def construct_multi_gpu_refine_template_kwargs(
     batch_size: int,
     devices: list[torch.device],
     num_cuda_streams: int,
+    frc: bool,
 ) -> list[dict]:
     """Split particle stack between requested devices.
 
@@ -261,7 +267,8 @@ def construct_multi_gpu_refine_template_kwargs(
         List of devices to split across.
     num_cuda_streams : int
         Number of CUDA streams to use per device.
-
+    frc : bool
+        Whether to run FRC instead of refine template.
     Returns
     -------
     list[dict]
@@ -322,6 +329,7 @@ def construct_multi_gpu_refine_template_kwargs(
             "projective_filters": device_projective_filters,
             "batch_size": batch_size,
             "num_cuda_streams": num_cuda_streams,
+            "frc": frc,
         }
 
         kwargs_per_device.append(kwargs)
@@ -350,6 +358,7 @@ def _core_refine_template_single_gpu(
     projective_filters: torch.Tensor,
     batch_size: int,
     num_cuda_streams: int = 1,
+    frc: bool = False,
 ) -> None:
     """Run refine template on a subset of particles on a single GPU.
 
@@ -391,6 +400,8 @@ def _core_refine_template_single_gpu(
         Batch size for orientation processing.
     num_cuda_streams : int, optional
         Number of CUDA streams to use for parallel processing. Defaults to 1.
+    frc : bool, optional
+        Whether to run FRC instead of refine template. Defaults to False.
     """
     device = particle_stack_dft.device
     streams = [torch.cuda.Stream(device=device) for _ in range(num_cuda_streams)]
@@ -439,6 +450,7 @@ def _core_refine_template_single_gpu(
                 projective_filter=projective_filters[i],
                 batch_size=batch_size,
                 device_id=device_id,
+                frc=frc,
             )
             refined_statistics.append(refined_stats)
 
@@ -535,6 +547,7 @@ def _core_refine_template_single_thread(
     projective_filter: torch.Tensor,
     batch_size: int = 32,
     device_id: int = 0,
+    frc: bool = False,
 ) -> dict[str, float | int]:
     """Run the single-threaded core refine template function.
 
@@ -575,6 +588,8 @@ def _core_refine_template_single_thread(
         The number of orientations to cross-correlate at once. Default is 32.
     device_id : int, optional
         The ID of the device/process. Default is 0.
+    frc : bool, optional
+        Whether to run FRC instead of refine template. Defaults to False.
 
     Returns
     -------
@@ -655,25 +670,32 @@ def _core_refine_template_single_thread(
         )
 
         # Calculate the cross-correlation
-        if particle_image_dft.device.type == "cuda":
-            # NOTE: Here we are setting to only a single stream, but this can easily
-            # be extended to multiple streams if needed.
-            cross_correlation = do_batched_orientation_cross_correlate(
+        if frc:
+            cross_correlation, fsc_single, frequency_pixels = do_orientation_frc(
                 image_dft=particle_image_dft,
                 template_dft=template_dft,
                 rotation_matrices=rot_matrix_batch,
                 projective_filters=combined_projective_filter,
             )
         else:
-            cross_correlation = do_batched_orientation_cross_correlate_cpu(
-                image_dft=particle_image_dft,
-                template_dft=template_dft,
-                rotation_matrices=rot_matrix_batch,
-                projective_filters=combined_projective_filter,
-            )
+            if particle_image_dft.device.type == "cuda":
+                # NOTE: Here we are setting to only a single stream, but this can easily
+                # be extended to multiple streams if needed.
+                cross_correlation = do_batched_orientation_cross_correlate(
+                    image_dft=particle_image_dft,
+                    template_dft=template_dft,
+                    rotation_matrices=rot_matrix_batch,
+                    projective_filters=combined_projective_filter,
+                )
+            else:
+                cross_correlation = do_batched_orientation_cross_correlate_cpu(
+                    image_dft=particle_image_dft,
+                    template_dft=template_dft,
+                    rotation_matrices=rot_matrix_batch,
+                    projective_filters=combined_projective_filter,
+                )
 
         cross_correlation = cross_correlation[..., :crop_h, :crop_w]  # valid crop
-
         # Scale cross_correlation to be "z-score"-like
         z_score = (cross_correlation - corr_mean) / corr_std
 
@@ -709,6 +731,21 @@ def _core_refine_template_single_thread(
             refined_pos_y = y_idx
             refined_pos_x = x_idx
             full_angle_idx = angle_idx + start_idx
+
+
+    #write fsc and freq index to csv file for this partilce index
+    # Write proper CSV format with headers for easy plotting
+    with open(f"results/frcs/frc_particle_{particle_index}.csv", "w") as f:
+        # Write CSV header
+        f.write("frequency,fsc\n")
+        
+        # Write data rows
+        freq_data = frequency_pixels.cpu().numpy()
+        fsc_data = fsc_single.cpu().numpy()
+        
+        for freq, fsc in zip(freq_data, fsc_data):
+            f.write(f"{freq},{fsc}\n")
+
     # Return the refined statistics
     refined_stats = {
         "max_cc": max_cc,

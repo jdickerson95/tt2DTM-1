@@ -2,6 +2,7 @@
 
 import torch
 from torch_fourier_slice import extract_central_slices_rfft_3d
+from torch_fourier_shell_correlation import fsc
 
 from leopard_em.backend.utils import (
     normalize_template_projection,
@@ -288,3 +289,116 @@ def do_batched_orientation_cross_correlate_cpu(
     cross_correlation = torch.fft.irfftn(projections_dft, dim=(-2, -1))
 
     return cross_correlation
+
+
+def do_orientation_frc(
+    image_dft: torch.Tensor,
+    template_dft: torch.Tensor,
+    rotation_matrices: torch.Tensor,
+    projective_filters: torch.Tensor,
+) -> torch.Tensor:
+    """Batched projection and cross-correlation with fixed (batched) filters.
+
+    NOTE: This function is similar to `do_streamed_orientation_cross_correlate` but
+    it computes cross-correlation batches over the orientation space. For example, if
+    there are 32 orientations to process and 10 different defocus values, then there
+    would be a total of 10 batched-32 cross-correlations computed.
+
+    NOTE: that this function returns a cross-correlogram with "same" mode (i.e. the
+    same size as the input image). See numpy correlate docs for more information.
+
+    Parameters
+    ----------
+    image_dft : torch.Tensor
+        Real-fourier transform (RFFT) of the image with large image filters
+        already applied. Has shape (H, W // 2 + 1).
+    template_dft : torch.Tensor
+        Real-fourier transform (RFFT) of the template volume to take Fourier
+        slices from. Has shape (l, h, w // 2 + 1) where (l, h, w) is the original
+        real-space shape of the template volume.
+    rotation_matrices : torch.Tensor
+        Rotation matrices to apply to the template volume. Has shape
+        (num_orientations, 3, 3).
+    projective_filters : torch.Tensor
+        Multiplied 'ctf_filters' with 'whitening_filter_template'. Has shape
+        (num_Cs, num_defocus, h, w // 2 + 1). Is RFFT and not fftshifted.
+
+    Returns
+    -------
+    torch.Tensor
+        Cross-correlation of the image with the template volume for each
+        orientation and defocus value. Will have shape
+        (num_Cs, num_defocus, num_orientations, H, W).
+    """
+    # Accounting for RFFT shape
+    projection_shape_real = (template_dft.shape[1], template_dft.shape[2] * 2 - 2)
+    image_shape_real = (image_dft.shape[0], image_dft.shape[1] * 2 - 2)
+
+    num_Cs = projective_filters.shape[0]  # pylint: disable=invalid-name
+    num_defocus = projective_filters.shape[1]
+
+    cross_correlation = torch.empty(
+        size=(
+            num_Cs,
+            num_defocus,
+            rotation_matrices.shape[0],
+            *image_shape_real,
+        ),
+        dtype=image_dft.real.dtype,  # Deduce the real dtype from complex DFT
+        device=image_dft.device,
+    )
+    image_real = torch.empty(
+        size=(
+            num_Cs,
+            num_defocus,
+            rotation_matrices.shape[0],
+            *image_shape_real,
+        ),
+        dtype=image_dft.real.dtype,  # Deduce the real dtype from complex DFT
+        device=image_dft.device,
+    )
+
+    # Extract central slice(s) from the template volume
+    fourier_slice = extract_central_slices_rfft_3d(
+        volume_rfft=template_dft,
+        image_shape=(projection_shape_real[0],) * 3,  # NOTE: requires cubic template
+        rotation_matrices=rotation_matrices,
+    )
+    fourier_slice = torch.fft.ifftshift(fourier_slice, dim=(-2,))
+    fourier_slice[..., 0, 0] = 0 + 0j  # zero out the DC component (mean zero)
+    fourier_slice *= -1  # flip contrast
+
+    # Apply the projective filters on a new batch dimension
+    fourier_slice = fourier_slice[None, None, ...] * projective_filters[:, :, None, ...]
+
+    # Inverse Fourier transform into real space and normalize
+    projections = torch.fft.irfftn(fourier_slice, dim=(-2, -1))
+    projections = torch.fft.ifftshift(projections, dim=(-2, -1))
+    projections = normalize_template_projection_compiled(
+        projections,
+        projection_shape_real,
+        image_shape_real,
+    )
+    frequency_pixels = torch.fft.rfftfreq(projections.shape[-1])
+    for j in range(num_defocus):
+        for k in range(num_Cs):
+            projections_dft = torch.fft.rfftn(
+                projections[k, j, ...], dim=(-2, -1), s=image_shape_real
+            )
+            projections_dft[..., 0, 0] = 0 + 0j
+
+            # Cross correlation step by element-wise multiplication
+            projections_dft = image_dft[None, ...] * projections_dft.conj()
+            torch.fft.irfftn(
+                projections_dft, dim=(-2, -1), out=cross_correlation[k, j, ...]
+            )
+
+            torch.fft.irfftn(image_dft, dim=(-2, -1), out=image_real[k, j, ...])
+            #print(image_real.shape)
+            #print(image_real[k, j, ...].shape)
+            #print(projections[k, j, ...].shape)
+
+
+            fsc_single = fsc(projections[k, j, 0, ...], image_real[k, j, 0, ...])
+
+    return cross_correlation, fsc_single, frequency_pixels
