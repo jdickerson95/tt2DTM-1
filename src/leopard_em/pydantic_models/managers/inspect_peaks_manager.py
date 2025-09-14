@@ -3,6 +3,7 @@
 from typing import Any, ClassVar
 
 import numpy as np
+import torch
 from pydantic import ConfigDict
 
 from leopard_em.backend.core_inspect_peaks import core_inspect_peaks
