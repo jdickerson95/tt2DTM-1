@@ -7,4 +7,5 @@ __all__ = [
     "core_match_template",
     "core_refine_template",
     "cross_correlate_particle_stack",
+    "core_inspect_peaks",
 ]
