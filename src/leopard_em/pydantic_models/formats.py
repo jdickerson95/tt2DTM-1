@@ -148,6 +148,7 @@ INSPECT_PEAKS_DF_COLUMN_ORDER = [
     "particle_index",
     "mip",
     "scaled_mip",
+    "inspect_peaks_mip",
     "inspect_peaks_scaled_mip",
     "correlation_mean",
     "correlation_variance",

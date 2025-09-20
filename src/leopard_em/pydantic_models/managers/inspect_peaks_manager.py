@@ -168,7 +168,8 @@ class InspectPeaksManager(BaseModel2DTM):
         # pylint: disable=duplicate-code
         df_inspect_peaks = self.particle_stack._df.copy()  # pylint: disable=protected-access
 
-        df_inspect_peaks["inspect_peaks_scaled_mip"] = result["average_surrounding_cc"]
+        df_inspect_peaks["inspect_peaks_scaled_mip"] = result["average_z_score"]
+        df_inspect_peaks["inspect_peaks_mip"] = result["average_surrounding_cc"]
 
         # Reorder the columns
         df_inspect_peaks = df_inspect_peaks.reindex(columns=INSPECT_PEAKS_DF_COLUMN_ORDER)

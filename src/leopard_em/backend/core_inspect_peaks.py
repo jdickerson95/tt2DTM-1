@@ -111,7 +111,7 @@ def core_inspect_peaks(
     Returns
     -------
     dict[str, torch.Tensor]
-        Dictionary containing the average surrounding correlation for all particles.
+        Dictionary containing the average z-score and average surrounding correlation for all particles.
     """
     # Convert single device to list for consistent handling
     if isinstance(device, torch.device):
@@ -151,6 +151,9 @@ def core_inspect_peaks(
             torch.cuda.synchronize(dev)
 
     # Concatenate results from all devices
+    average_z_score = torch.cat(
+        [torch.from_numpy(r["average_z_score"]) for r in results.values()]
+    )
     average_surrounding_cc = torch.cat(
         [torch.from_numpy(r["average_surrounding_cc"]) for r in results.values()]
     )
@@ -162,9 +165,11 @@ def core_inspect_peaks(
     )
     sort_indices = torch.argsort(particle_indices)
 
+    average_z_score = average_z_score[sort_indices]
     average_surrounding_cc = average_surrounding_cc[sort_indices]
 
     return {
+        "average_z_score": average_z_score,
         "average_surrounding_cc": average_surrounding_cc,
     }
 
@@ -430,13 +435,17 @@ def _core_inspect_peaks_single_gpu(
     for stream in streams:
         stream.synchronize()
 
-    # Extract the average surrounding correlation values
+    # Extract the inspect statistics
+    average_z_score = torch.tensor(
+        [stats["average_z_score"] for stats in inspect_statistics], device=device
+    )
     average_surrounding_cc = torch.tensor(
         [stats["average_surrounding_cc"] for stats in inspect_statistics], device=device
     )
 
     # Store the results in the shared dict
     result = {
+        "average_z_score": average_z_score.cpu().numpy(),
         "average_surrounding_cc": average_surrounding_cc.cpu().numpy(),
         "particle_indices": particle_indices.cpu().numpy(),  # Original idxs for sorting
     }
@@ -506,7 +515,7 @@ def _core_inspect_peaks_single_thread(
     Returns
     -------
     dict[str, float]
-        The inspect statistics for the particle.
+        The inspect statistics for the particle containing average_z_score and average_surrounding_cc.
     """
     img_h, img_w = particle_image_dft.shape
     _, template_h, template_w = template_dft.shape
@@ -519,6 +528,8 @@ def _core_inspect_peaks_single_thread(
 
     # Output best statistics
     max_z_score = -1e9
+    max_cc = -1e9
+    average_z_score = 0.0
     average_surrounding_cc = 0.0
 
     # The "best" Euler angle from the match template program
@@ -605,14 +616,14 @@ def _core_inspect_peaks_single_thread(
         if z_score.max() > max_z_score:
             max_z_score = z_score.max()
 
-            # Find the maximum value and its indices
+            # Find the maximum z-score value and its indices
             max_values, max_indices = torch.max(z_score.view(-1, crop_h, crop_w), dim=0)
 
-            # Get the overall maximum value and its position
+            # Get the overall maximum z-score value and its position
             _, max_pos = torch.max(max_values.view(-1), dim=0)
             y_idx, x_idx = max_pos // crop_w, max_pos % crop_w
 
-            # Calculate the indices for each dimension
+            # Calculate the indices for each dimension based on the max z-score location
             flat_idx = max_indices[y_idx, x_idx]
             px_idx = flat_idx // (len(defocus_offsets) * len(euler_angle_offsets_batch))
             defocus_idx = (flat_idx // len(euler_angle_offsets_batch)) % len(
@@ -620,18 +631,24 @@ def _core_inspect_peaks_single_thread(
             )
             angle_idx = flat_idx % len(euler_angle_offsets_batch)
 
-            # Get the specific z_score tensor for the best configuration
+            # Get the specific z_score and cross_correlation tensors for the best configuration
             best_z_score = z_score[px_idx, defocus_idx, angle_idx]
+            best_cross_correlation = cross_correlation[px_idx, defocus_idx, angle_idx]
             
-            # Create a mask to exclude the maximum pixel
+            # Get the cross-correlation value at the max z-score pixel location
+            max_cc = best_cross_correlation[y_idx, x_idx].item()
+            
+            # Create a mask to exclude the maximum z-score pixel
             mask = torch.ones_like(best_z_score, dtype=torch.bool)
             mask[y_idx, x_idx] = False
             
-            # Calculate average of all pixels except the maximum
-            average_surrounding_cc = best_z_score[mask].mean().item()
+            # Calculate average of all pixels except the maximum z-score pixel
+            average_z_score = best_z_score[mask].mean().item()
+            average_surrounding_cc = best_cross_correlation[mask].mean().item()
 
     # Return the inspect statistics
     inspect_stats = {
+        "average_z_score": average_z_score,
         "average_surrounding_cc": average_surrounding_cc,
     }
 
