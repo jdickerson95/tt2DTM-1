@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch_fourier_filter.ctf import calculate_ctf_2d
 from torch_fourier_filter.envelopes import b_envelope
+from torch_fourier_filter.dose_weight import dose_weight_movie
 
 # Using the TYPE_CHECKING statement to avoid circular imports
 if TYPE_CHECKING:
@@ -349,6 +350,10 @@ def setup_images_filters_particle_stack(
     particle_stack: "ParticleStack",
     preprocessing_filters: "PreprocessingFilters",
     template: torch.Tensor,
+    movie: torch.Tensor,
+    deformation_field: torch.Tensor,
+    pre_exposure: float,
+    dose_per_frame: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Extract and preprocess particle images and calculate filters.
 
@@ -363,7 +368,14 @@ def setup_images_filters_particle_stack(
         Filters to apply to the particle images.
     template : torch.Tensor
         The 3D template volume.
-
+    movie: torch.Tensor
+        The movie tensor.
+    deformation_field: torch.Tensor
+        The deformation field tensor.
+    pre_exposure: float
+        The pre-exposure fluence in elecrtons per Angstrom squared.
+    dose_per_frame: float
+        The dose per frame in electrons per Angstrom squared.
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -373,12 +385,24 @@ def setup_images_filters_particle_stack(
         - projective_filters: Filters applied to the template
     """
     # Extract out the regions of interest (particles) based on the particle stack
-    particle_images = particle_stack.construct_image_stack(
-        pos_reference="top-left",
-        padding_value=0.0,
-        handle_bounds="pad",
-        padding_mode="constant",
-    )
+    if movie is not None and deformation_field is not None:
+        particle_images = particle_stack.construct_image_stack_from_movie(
+            movie=movie,
+            deformation_field=deformation_field,
+            pos_reference="top-left",
+            handle_bounds="pad",
+            padding_mode="constant",
+            padding_value=0.0,
+            pre_exposure=pre_exposure,
+            dose_per_frame=dose_per_frame,
+        )
+    else:
+        particle_images = particle_stack.construct_image_stack(
+            pos_reference="top-left",
+            padding_value=0.0,
+            handle_bounds="pad",
+            padding_mode="constant",
+        )
 
     # FFT the particle images
     # pylint: disable=E1102
@@ -424,6 +448,10 @@ def setup_particle_backend_kwargs(
     euler_angle_offsets: torch.Tensor,
     defocus_offsets: torch.Tensor,
     pixel_size_offsets: torch.Tensor,
+    movie: torch.Tensor,
+    deformation_field: torch.Tensor,
+    pre_exposure: float,
+    dose_per_frame: float,
     device_list: list,
 ) -> dict[str, Any]:
     """Create common kwargs dictionary for template backend functions.
@@ -447,6 +475,14 @@ def setup_particle_backend_kwargs(
         The relative defocus values to search over.
     pixel_size_offsets : torch.Tensor
         The relative pixel size values to search over.
+    movie: torch.Tensor
+        The movie tensor.
+    deformation_field: torch.Tensor
+        The deformation field tensor.
+    pre_exposure: float
+        The pre-exposure fluence in elecrtons per Angstrom squared.
+    dose_per_frame: float
+        The dose per frame in electrons per Angstrom squared.
     device_list : list
         List of computational devices to use.
 
@@ -476,7 +512,13 @@ def setup_particle_backend_kwargs(
         template_dft,
         projective_filters,
     ) = setup_images_filters_particle_stack(
-        particle_stack, preprocessing_filters, template
+        particle_stack=particle_stack, 
+        preprocessing_filters=preprocessing_filters, 
+        template=template,
+        movie=movie, 
+        deformation_field=deformation_field,
+        pre_exposure=pre_exposure,
+        dose_per_frame=dose_per_frame,
     )
 
     # The best defocus values for each particle (+ astigmatism)
@@ -503,3 +545,31 @@ def setup_particle_backend_kwargs(
         "projective_filters": projective_filters,
         "device": device_list,
     }
+
+def dose_weight(
+    movie_fft : torch.Tensor,
+    pixel_size : float,
+    pre_exposure : float,
+    dose_per_frame : float,
+    voltage : float,
+    ) -> torch.Tensor:
+    # get the height and width from the last two dimensions
+    frame_shape = (movie_fft.shape[-2], movie_fft.shape[-1]*2 - 2)
+    #mean zero
+    movie_fft[..., 0, 0] = 0.0 + 0.0j
+    #apply dose weight
+    movie_dw_dft = dose_weight_movie(
+        movie_dft=movie_fft,
+        image_shape=frame_shape,
+        pixel_size=pixel_size,
+        pre_exposure=pre_exposure,
+        dose_per_frame=dose_per_frame,
+        voltage=voltage,
+        crit_exposure_bfactor=-1,
+        rfft=True,
+        fftshift=False,
+    )
+    #inverse FFT
+    movie_dw = torch.fft.irfft2(movie_dw_dft, s=frame_shape, dim=(-2, -1), norm='ortho')
+    image_dw = torch.sum(movie_dw, dim=0)
+    return image_dw

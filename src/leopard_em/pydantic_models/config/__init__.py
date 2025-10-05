@@ -19,6 +19,8 @@ from .orientation_search import (
     RefineOrientationConfig,
 )
 from .pixel_size_search import PixelSizeSearchConfig
+from .movie_config import MovieConfig
+
 
 __all__ = [
     "ArbitraryCurveFilterConfig",
@@ -34,4 +36,5 @@ __all__ = [
     "RefineOrientationConfig",
     "WhiteningFilterConfig",
     "ConstrainedOrientationConfig",
+    "MovieConfig",
 ]
