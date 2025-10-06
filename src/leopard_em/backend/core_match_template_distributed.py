@@ -23,7 +23,7 @@ from leopard_em.backend.process_results import (
 )
 
 # Turn off gradient calculations
-torch.set_grad_enabled(False)
+torch.set_grad_enabled(True)
 
 
 def _check_port_free(port: int) -> bool:

@@ -14,10 +14,8 @@ from leopard_em.pydantic_models.formats import MATCH_TEMPLATE_DF_COLUMN_ORDER
 from leopard_em.pydantic_models.utils import dose_weight
 from leopard_em.utils.data_io import load_mrc_image
 
-from torch_motion_correction import (
-    get_pixel_shifts,
-    evaluate_deformation_field_at_t,
-)
+from torch_motion_correction.correct_motion import get_pixel_shifts
+from torch_motion_correction.deformation_field_utils import evaluate_deformation_field_at_t
 
 from torch_grid_utils import coordinate_grid
 from torch_fourier_shift import fourier_shift_dft_2d

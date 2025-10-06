@@ -4,7 +4,7 @@ import torch
 
 from leopard_em.pydantic_models.custom_types import BaseModel2DTM
 from leopard_em.utils.data_io import load_mrc_volume
-from torch_motion_correction import read_deformation_field_from_csv
+from torch_motion_correction.data_io import read_deformation_field_from_csv
 
 
 class MovieConfig(BaseModel2DTM):
