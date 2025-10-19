@@ -26,7 +26,7 @@ from leopard_em.backend.utils import (
 DEFAULT_STATISTIC_DTYPE = torch.float32
 
 # Turn off gradient calculations by default
-torch.set_grad_enabled(False)
+torch.set_grad_enabled(True)
 
 # Set multiprocessing start method to spawn
 set_start_method("spawn", force=True)

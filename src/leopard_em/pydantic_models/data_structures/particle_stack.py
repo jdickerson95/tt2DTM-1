@@ -1,7 +1,7 @@
 """Particle stack Pydantic model for dealing with extracted particle data."""
 
 import warnings
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -168,19 +168,29 @@ def _get_cropped_image_regions_numpy(
     Reference value is handled by the user-exposed 'get_cropped_image_regions' function.
     """
     if handle_bounds == "pad":
-        bs1 = box_size[1] - 1
-        bs0 = box_size[0] - 1
+        # Calculate required padding based on actual positions to handle edge cases
+        min_y = int(pos_y.min())
+        min_x = int(pos_x.min())
+        max_y = int(pos_y.max()) + box_size[0]
+        max_x = int(pos_x.max()) + box_size[1]
+        
+        # Padding needed on each side
+        pad_top = max(0, -min_y)
+        pad_left = max(0, -min_x)
+        pad_bottom = max(0, max_y - image.shape[0])
+        pad_right = max(0, max_x - image.shape[1])
+        
         pad_kwargs = {}
         if padding_mode == "constant":
             pad_kwargs["constant_values"] = padding_value
         image = np.pad(
             image,
-            pad_width=((bs0, bs0), (bs1, bs1)),
+            pad_width=((pad_top, pad_bottom), (pad_left, pad_right)),
             mode=padding_mode,
             **pad_kwargs,
         )
-        pos_y = pos_y + bs0
-        pos_x = pos_x + bs1
+        pos_y = pos_y + pad_top
+        pos_x = pos_x + pad_left
 
     regions = []
     for y, x in zip(pos_y, pos_x):
@@ -219,8 +229,18 @@ def _get_cropped_image_regions_torch(
     Reference value is handled by the user-exposed 'get_cropped_image_regions' function.
     """
     if handle_bounds == "pad":
-        bs1 = box_size[1] - 1
-        bs0 = box_size[0] - 1
+        # Calculate required padding based on actual positions to handle edge cases
+        min_y = int(pos_y.min().item())
+        min_x = int(pos_x.min().item())
+        max_y = int(pos_y.max().item()) + box_size[0]
+        max_x = int(pos_x.max().item()) + box_size[1]
+        
+        # Padding needed on each side
+        pad_top = max(0, -min_y)
+        pad_left = max(0, -min_x)
+        pad_bottom = max(0, max_y - image.shape[0])
+        pad_right = max(0, max_x - image.shape[1])
+        
         pad_kwargs = {}
         if padding_mode == "constant":
             pad_kwargs["value"] = padding_value
@@ -228,12 +248,12 @@ def _get_cropped_image_regions_torch(
         # tensor shapes. Looks like API for padding may change in the future torch...
         image = torch.nn.functional.pad(
             image.unsqueeze(0),
-            pad=(bs1, bs1, bs0, bs0),
+            pad=(pad_left, pad_right, pad_top, pad_bottom),
             mode=padding_mode,
             **pad_kwargs,
         ).squeeze(0)
-        pos_y = pos_y + bs0
-        pos_x = pos_x + bs1
+        pos_y = pos_y + pad_top
+        pos_x = pos_x + pad_left
 
     regions = []
     for y, x in zip(pos_y, pos_x):
@@ -376,6 +396,7 @@ class ParticleStack(BaseModel2DTM):
         handle_bounds: Literal["pad", "error"] = "pad",
         padding_mode: Literal["constant", "reflect", "replicate"] = "constant",
         padding_value: float = 0.0,
+        mrc_image: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Construct stack of images from the DataFrame (updates image_stack in-place).
 
@@ -445,6 +466,9 @@ class ParticleStack(BaseModel2DTM):
         padding_value : float, optional
             The value to use for padding when `padding_mode` is "constant", by default
             0.0.
+        mrc_image : torch.Tensor, optional
+            If an image is provided, this will be used to construct the particle stack.
+            If not provided (default), a list of micrographs is taken from the df.
 
         Returns
         -------
@@ -459,13 +483,13 @@ class ParticleStack(BaseModel2DTM):
         box_h, box_w = self.extracted_box_size
         image_stack = torch.zeros((self.num_particles, *self.extracted_box_size))
 
-        # Find the indexes in the DataFrame that correspond to each unique image
-        image_index_groups = self._df.groupby("micrograph_path").groups
-        for img_path, indexes in image_index_groups.items():
-            img = load_mrc_image(img_path)
+        # Set default padding value if None
+        actual_padding_value = 0.0 if padding_value is None else padding_value
 
-            pos_y = self._df.loc[indexes, y_col].to_numpy()
-            pos_x = self._df.loc[indexes, x_col].to_numpy()
+        if mrc_image is not None:
+            # Use the provided image for all particles
+            pos_y = self._df[y_col].to_numpy()
+            pos_x = self._df[x_col].to_numpy()
 
             # If the position reference is "center", shift (x, y) by half the original
             # template width/height so reference is now the top-left corner
@@ -487,6 +511,44 @@ class ParticleStack(BaseModel2DTM):
             # Code logic is simplified by only using the top-left reference position
             # in the `get_cropped_image_regions` function. Relative referencing handled
             # by the ParticleStack class.
+            cropped_images = get_cropped_image_regions(
+                mrc_image,
+                pos_y,
+                pos_x,
+                self.extracted_box_size,
+                pos_reference="top-left",
+                handle_bounds=handle_bounds,
+                padding_mode=padding_mode,
+                padding_value=actual_padding_value,
+            )
+            image_stack = cropped_images
+
+        else:
+            # Find the indexes in the DataFrame that correspond to each unique image
+            image_index_groups = self._df.groupby("micrograph_path").groups
+            for img_path, indexes in image_index_groups.items():
+                img = load_mrc_image(img_path)
+
+                pos_y = self._df.loc[indexes, y_col].to_numpy()
+                pos_x = self._df.loc[indexes, x_col].to_numpy()
+
+            # If the position reference is "center", shift (x, y) by half the original
+            # template width/height so reference is now the top-left corner
+            if pos_reference == "center":
+                pos_y = pos_y - h // 2
+                pos_x = pos_x - w // 2
+
+            # Our reference is now a top-left corner of a box of the original template
+            # shape, BUT we want a slightly larger box of extracted_box_size AND this
+            # box to be centered around the particle. Therefore, need to shift the
+            # position half the difference between the original template size and
+            # the extracted box size.
+            pos_y -= (box_h - h) // 2
+            pos_x -= (box_w - w) // 2
+
+            pos_y = torch.tensor(pos_y)
+            pos_x = torch.tensor(pos_x)
+            
             cropped_images = get_cropped_image_regions(
                 img,
                 pos_y,

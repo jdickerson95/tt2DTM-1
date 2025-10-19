@@ -63,7 +63,8 @@ class InspectPeaksManager(BaseModel2DTM):
             self.template_volume = load_mrc_volume(self.template_volume_path)
 
     def make_backend_core_function_kwargs(
-        self, prefer_refined_angles: bool = True
+        self, prefer_refined_angles: bool = True,
+        mrc_image: torch.Tensor = None,
     ) -> dict[str, Any]:
         """Create the kwargs for the backend inspect peaks core function.
 
@@ -72,25 +73,38 @@ class InspectPeaksManager(BaseModel2DTM):
         prefer_refined_angles : bool
             Whether to use the refined angles from the particle stack. Defaults to
             False.
+        mrc_image : torch.Tensor, optional
+            If an image is provided, this will be used to construct the particle stack.
+            If not provided (default), a list of micrographs is taken from the df.
         """
-        # Ensure the template is loaded in as a Tensor object
+        # Determine device from mrc_image or use first GPU device
+        if mrc_image is not None:
+            device = mrc_image.device
+        else:
+            device = self.computational_config.gpu_devices[0]
+        
+        # Ensure the template is loaded in as a Tensor object on the correct device
         template = load_template_tensor(
             template_volume=self.template_volume,
             template_volume_path=self.template_volume_path,
         )
+        if not isinstance(template, torch.Tensor):
+            template = torch.from_numpy(template)
+        template = template.to(device)
 
         # The set of "best" euler angles from match template search
         # Check if refined angles exist, otherwise use the original angles
         euler_angles = self.particle_stack.get_euler_angles(prefer_refined_angles)
+        euler_angles = euler_angles.to(device)
 
-        # The relative Euler angle offsets to search over (none for now)
-        euler_angle_offsets = torch.zeros((1, 3))
+        # The relative Euler angle offsets to search over (none for now) - on GPU
+        euler_angle_offsets = torch.zeros((1, 3), device=device)
 
-        # The relative defocus values to search over
-        defocus_offsets = torch.tensor([0.0])
+        # The relative defocus values to search over - on GPU
+        defocus_offsets = torch.tensor([0.0], device=device)
 
-        # No pixel size refinement
-        pixel_size_offsets = torch.tensor([0.0])
+        # No pixel size refinement - on GPU
+        pixel_size_offsets = torch.tensor([0.0], device=device)
 
         # Use the common utility function to set up the backend kwargs
         # pylint: disable=duplicate-code
@@ -103,10 +117,12 @@ class InspectPeaksManager(BaseModel2DTM):
             defocus_offsets=defocus_offsets,
             pixel_size_offsets=pixel_size_offsets,
             device_list=self.computational_config.gpu_devices,
+            mrc_image=mrc_image,
         )
 
     def run_inspect_peaks(
-        self, output_dataframe_path: str, correlation_batch_size: int = 32
+        self, output_dataframe_path: str, correlation_batch_size: int = 32,
+        use_multiprocessing: bool = True,
     ) -> None:
         """Run the inspect peaks program and saves the resultant DataFrame to csv.
 
@@ -116,18 +132,22 @@ class InspectPeaksManager(BaseModel2DTM):
             Path to save the inspect peaks particle data.
         correlation_batch_size : int
             Number of cross-correlations to process in one batch, defaults to 32.
+        use_multiprocessing : bool
+            Whether to use multiprocessing to run the inspect peaks program.
+            Defaults to True.
         """
         backend_kwargs = self.make_backend_core_function_kwargs()
 
-        result = self.get_inspect_peaks_result(backend_kwargs, correlation_batch_size)
+        result = self.get_inspect_peaks_result(backend_kwargs, correlation_batch_size, use_multiprocessing)
 
         self.inspect_peaks_result_to_dataframe(
             output_dataframe_path=output_dataframe_path, result=result
         )
 
     def get_inspect_peaks_result(
-        self, backend_kwargs: dict, correlation_batch_size: int = 32
-    ) -> dict[str, np.ndarray]:
+        self, backend_kwargs: dict, correlation_batch_size: int = 32,
+        use_multiprocessing: bool = True,
+    ) -> dict[str, torch.Tensor]:
         """Get inspect peaks result.
 
         Parameters
@@ -136,25 +156,31 @@ class InspectPeaksManager(BaseModel2DTM):
             Keyword arguments for the backend processing
         correlation_batch_size : int
             Number of orientations to process at once. Defaults to 32.
-
+        use_multiprocessing : bool
+            Whether to use multiprocessing to run the inspect peaks program.
+            Defaults to True.
         Returns
         -------
-        dict[str, np.ndarray]
+        dict[str, torch.Tensor]
             The result of the inspect peaks program.
         """
         # pylint: disable=duplicate-code
-        result: dict[str, np.ndarray] = {}
+        result: tuple[torch.Tensor, torch.Tensor] = (None, None)
         result = core_inspect_peaks(
             batch_size=correlation_batch_size,
             num_cuda_streams=self.computational_config.num_cpus,
+            use_multiprocessing=use_multiprocessing,
             **backend_kwargs,
         )
-        result = {k: v.cpu().numpy() for k, v in result.items()}
+        result = {
+            "max_z_score": result[0],
+            "max_cc": result[1],
+        }
 
         return result
 
     def inspect_peaks_result_to_dataframe(
-        self, output_dataframe_path: str, result: dict[str, np.ndarray]
+        self, output_dataframe_path: str, result: dict[str, torch.Tensor]
     ) -> None:
         """Convert inspect peaks result to dataframe.
 
@@ -162,14 +188,15 @@ class InspectPeaksManager(BaseModel2DTM):
         ----------
         output_dataframe_path : str
             Path to save the inspect peaks particle data.
-        result : dict[str, np.ndarray]
+        result : dict[str, torch.Tensor]
             The result of the inspect peaks program.
         """
         # pylint: disable=duplicate-code
         df_inspect_peaks = self.particle_stack._df.copy()  # pylint: disable=protected-access
 
-        df_inspect_peaks["inspect_peaks_scaled_mip"] = result["average_z_score"]
-        df_inspect_peaks["inspect_peaks_mip"] = result["average_surrounding_cc"]
+        # Convert to numpy only when assigning to dataframe columns
+        df_inspect_peaks["inspect_peaks_scaled_mip"] = result["max_z_score"].cpu().detach().numpy()
+        df_inspect_peaks["inspect_peaks_mip"] = result["max_cc"].cpu().detach().numpy()
 
         # Reorder the columns
         df_inspect_peaks = df_inspect_peaks.reindex(columns=INSPECT_PEAKS_DF_COLUMN_ORDER)

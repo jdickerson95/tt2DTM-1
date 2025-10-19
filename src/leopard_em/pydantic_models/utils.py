@@ -44,7 +44,7 @@ def preprocess_image(
     squared_sum += torch.sum(
         squared_image_rfft[..., :, 1:-1], dim=(-2, -1), keepdim=True
     )
-    image_rfft /= torch.sqrt(squared_sum)
+    image_rfft = image_rfft / torch.sqrt(squared_sum)  # Non-in-place to preserve gradients
 
     # NOTE: For two Gaussian random variables in d-dimensional space --  A and B --
     # each with mean 0 and variance 1 their correlation will have on average a
@@ -59,7 +59,7 @@ def preprocess_image(
     # Below, we calculate the dimensionality of our cross-correlation and divide
     # by the square root of that number to normalize the image.
     dimensionality = bandpass_filter.sum() + bandpass_filter[:, 1:-1].sum()
-    image_rfft *= dimensionality**0.5
+    image_rfft = image_rfft * (dimensionality**0.5)  # Non-in-place to preserve gradients
 
     return image_rfft
 
@@ -349,6 +349,7 @@ def setup_images_filters_particle_stack(
     particle_stack: "ParticleStack",
     preprocessing_filters: "PreprocessingFilters",
     template: torch.Tensor,
+    mrc_image: torch.Tensor = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Extract and preprocess particle images and calculate filters.
 
@@ -363,6 +364,9 @@ def setup_images_filters_particle_stack(
         Filters to apply to the particle images.
     template : torch.Tensor
         The 3D template volume.
+    mrc_image : torch.Tensor, optional
+        If an image is provided, this will be used to construct the particle stack.
+        If not provided (default), a list of micrographs is taken from the df.
 
     Returns
     -------
@@ -372,27 +376,39 @@ def setup_images_filters_particle_stack(
         - template_dft: The Fourier transformed template
         - projective_filters: Filters applied to the template
     """
+    # Get device from template
+    device = template.device
+    
     # Extract out the regions of interest (particles) based on the particle stack
     particle_images = particle_stack.construct_image_stack(
         pos_reference="top-left",
         padding_value=0.0,
         handle_bounds="pad",
         padding_mode="constant",
+        mrc_image=mrc_image,
     )
+    
+    # Ensure particle images are on the correct device
+    if particle_images.device != device:
+        particle_images = particle_images.to(device)
 
     # FFT the particle images
     # pylint: disable=E1102
     particle_images_dft = torch.fft.rfftn(particle_images, dim=(-2, -1))
-    particle_images_dft[..., 0, 0] = 0.0 + 0.0j  # Zero out DC component
+    
+    # Zero out DC component - clone first if gradients are needed to avoid in-place issues
+    if particle_images.requires_grad:
+        particle_images_dft = particle_images_dft.clone()
+    particle_images_dft[..., 0, 0] = 0.0 + 0.0j
 
     bandpass_filter = preprocessing_filters.bandpass_filter.calculate_bandpass_filter(
         particle_images_dft.shape[-2:]
-    )
+    ).to(device)
 
     # Calculate and apply the filters for the particle image stack
     filter_stack = particle_stack.construct_filter_stack(
         preprocessing_filters, output_shape=particle_images_dft.shape[-2:]
-    )
+    ).to(device)
 
     particle_images_dft = preprocess_image(
         image_rfft=particle_images_dft,
@@ -404,7 +420,7 @@ def setup_images_filters_particle_stack(
     projective_filters = particle_stack.construct_filter_stack(
         preprocessing_filters,
         output_shape=(template.shape[-2], template.shape[-1] // 2 + 1),
-    )
+    ).to(device)
 
     template_dft = volume_to_rfft_fourier_slice(template)
 
@@ -425,6 +441,7 @@ def setup_particle_backend_kwargs(
     defocus_offsets: torch.Tensor,
     pixel_size_offsets: torch.Tensor,
     device_list: list,
+    mrc_image: torch.Tensor = None,
 ) -> dict[str, Any]:
     """Create common kwargs dictionary for template backend functions.
 
@@ -449,25 +466,31 @@ def setup_particle_backend_kwargs(
         The relative pixel size values to search over.
     device_list : list
         List of computational devices to use.
+    mrc_image : torch.Tensor, optional
+        If an image is provided, this will be used to construct the particle stack.
+        If not provided (default), a list of micrographs is taken from the df.
 
     Returns
     -------
     dict[str, Any]
         Dictionary of keyword arguments for backend functions.
     """
-    # Get correlation statistics
+    # Determine the device to use - should be consistent with input tensors
+    device = template.device
+    
+    # Get correlation statistics and move to GPU
     corr_mean_stack = particle_stack.construct_cropped_statistic_stack(
         stat="correlation_average",
         handle_bounds="pad",
         padding_mode="constant",
         padding_value=0.0,  # pad with zeros
-    )
+    ).to(device)
     corr_std_stack = particle_stack.construct_cropped_statistic_stack(
         stat="correlation_variance",
         handle_bounds="pad",
         padding_mode="constant",
         padding_value=1e10,  # large to avoid out of bound pixels having inf z-score
-    )
+    ).to(device)
     corr_std_stack = corr_std_stack**0.5  # Convert variance to standard deviation
 
     # Extract and preprocess images and filters
@@ -476,12 +499,14 @@ def setup_particle_backend_kwargs(
         template_dft,
         projective_filters,
     ) = setup_images_filters_particle_stack(
-        particle_stack, preprocessing_filters, template
+        particle_stack, preprocessing_filters, template, mrc_image
     )
 
-    # The best defocus values for each particle (+ astigmatism)
+    # The best defocus values for each particle (+ astigmatism) - on GPU
     defocus_u, defocus_v = particle_stack.get_absolute_defocus()
-    defocus_angle = torch.tensor(particle_stack["astigmatism_angle"])
+    defocus_u = defocus_u.to(device)
+    defocus_v = defocus_v.to(device)
+    defocus_angle = torch.tensor(particle_stack["astigmatism_angle"], device=device)
 
     ctf_kwargs = _setup_ctf_kwargs_from_particle_stack(
         particle_stack, (template.shape[-2], template.shape[-1])
