@@ -1049,7 +1049,7 @@ class ParticleStack(BaseModel2DTM):
             # in the `get_cropped_image_regions` function. Relative referencing handled
             # by the ParticleStack class.
             cropped_images = get_cropped_image_regions(
-                movie_frame_deformed,
+                movie_frame,
                 pos_y,
                 pos_x,
                 self.extracted_box_size,
@@ -1098,7 +1098,7 @@ class ParticleStack(BaseModel2DTM):
             cropped_images_dft = torch.fft.rfftn(cropped_images, dim=(-2, -1))
             #cropped_images_dft = torch.fft.rfftn(cropped_images_deformed, dim=(-2, -1))
             
-            '''
+            
             shifted_fft = fourier_shift_dft_2d(
                 dft=cropped_images_dft,
                 image_shape=(box_h, box_w),
@@ -1106,8 +1106,8 @@ class ParticleStack(BaseModel2DTM):
                 rfft=True,
                 fftshifted=False,
             )
-            '''
-            shifted_fft = cropped_images_dft
+            
+            #shifted_fft = cropped_images_dft
             
             
             #store them in a tensor shape (N, t, box_h, box_w)
