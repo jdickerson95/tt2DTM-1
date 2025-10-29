@@ -1,6 +1,9 @@
 """Pydantic models for search and refinement configurations in Leopard-EM."""
 
-from .computational_config import ComputationalConfig
+from .computational_config import (
+    ComputationalConfigMatch,
+    ComputationalConfigRefine,
+)
 from .correlation_filters import (
     ArbitraryCurveFilterConfig,
     BandpassFilterConfig,
@@ -16,11 +19,14 @@ from .orientation_search import (
     RefineOrientationConfig,
 )
 from .pixel_size_search import PixelSizeSearchConfig
+from .movie_config import MovieConfig
+
 
 __all__ = [
     "ArbitraryCurveFilterConfig",
     "BandpassFilterConfig",
-    "ComputationalConfig",
+    "ComputationalConfigMatch",
+    "ComputationalConfigRefine",
     "DefocusSearchConfig",
     "MultipleOrientationConfig",
     "OrientationSearchConfig",
@@ -30,4 +36,5 @@ __all__ = [
     "RefineOrientationConfig",
     "WhiteningFilterConfig",
     "ConstrainedOrientationConfig",
+    "MovieConfig",
 ]

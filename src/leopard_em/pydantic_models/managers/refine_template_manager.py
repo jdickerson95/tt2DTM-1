@@ -7,11 +7,12 @@ from pydantic import ConfigDict
 
 from leopard_em.backend.core_refine_template import core_refine_template
 from leopard_em.pydantic_models.config import (
-    ComputationalConfig,
+    ComputationalConfigRefine,
     DefocusSearchConfig,
     PixelSizeSearchConfig,
     PreprocessingFilters,
     RefineOrientationConfig,
+    MovieConfig,
 )
 from leopard_em.pydantic_models.custom_types import BaseModel2DTM, ExcludedTensor
 from leopard_em.pydantic_models.data_structures import ParticleStack
@@ -37,8 +38,10 @@ class RefineTemplateManager(BaseModel2DTM):
         Configuration for orientation refinement.
     preprocessing_filters : PreprocessingFilters
         Filters to apply to the particle images.
-    computational_config : ComputationalConfig
+    computational_config : ComputationalConfigRefine
         What computational resources to allocate for the program.
+    movie_config : MovieConfig
+        Configuration for movie processing.
     template_volume : ExcludedTensor
         The template volume tensor (excluded from serialization).
 
@@ -61,7 +64,9 @@ class RefineTemplateManager(BaseModel2DTM):
     pixel_size_refinement_config: PixelSizeSearchConfig
     orientation_refinement_config: RefineOrientationConfig
     preprocessing_filters: PreprocessingFilters
-    computational_config: ComputationalConfig
+    computational_config: ComputationalConfigRefine
+    movie_config : MovieConfig
+
 
     # Excluded tensors
     template_volume: ExcludedTensor
@@ -103,6 +108,10 @@ class RefineTemplateManager(BaseModel2DTM):
         # The relative pixel size values to search over
         pixel_size_offsets = self.pixel_size_refinement_config.pixel_size_values
 
+        #Load movie and deformation field
+        movie = self.movie_config.movie
+        deformation_field = self.movie_config.deformation_field
+
         # Use the common utility function to set up the backend kwargs
         # pylint: disable=duplicate-code
         return setup_particle_backend_kwargs(
@@ -113,6 +122,10 @@ class RefineTemplateManager(BaseModel2DTM):
             euler_angle_offsets=euler_angle_offsets,
             defocus_offsets=defocus_offsets,
             pixel_size_offsets=pixel_size_offsets,
+            movie=movie,
+            deformation_field=deformation_field,
+            pre_exposure=self.movie_config.pre_exposure,
+            dose_per_frame=self.movie_config.dose_per_frame,
             device_list=self.computational_config.gpu_devices,
         )
 

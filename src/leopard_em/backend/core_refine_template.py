@@ -15,10 +15,8 @@ from leopard_em.backend.cross_correlation import (
     do_batched_orientation_cross_correlate,
     do_batched_orientation_cross_correlate_cpu,
 )
-from leopard_em.backend.utils import (
-    normalize_template_projection,
-    run_multiprocess_jobs,
-)
+from leopard_em.backend.distributed import run_multiprocess_jobs
+from leopard_em.backend.utils import normalize_template_projection
 from leopard_em.pydantic_models.utils import calculate_ctf_filter_stack_full_args
 from leopard_em.utils.cross_correlation import handle_correlation_mode
 
@@ -298,26 +296,27 @@ def construct_multi_gpu_refine_template_kwargs(
 
         # Split tensors for this device. All these tensors are per-particle, that is
         # the i-th element in each tensor corresponds to the i-th particle in the stack.
-        device_particle_stack_dft = particle_stack_dft[start_idx:end_idx]
-        device_euler_angles = euler_angles[start_idx:end_idx]
-        device_defocus_u = defocus_u[start_idx:end_idx]
-        device_defocus_v = defocus_v[start_idx:end_idx]
-        device_defocus_angle = defocus_angle[start_idx:end_idx]
-        device_projective_filters = projective_filters[start_idx:end_idx]
+        # Detach all tensors to avoid serialization issues with requires_grad=True tensors
+        device_particle_stack_dft = particle_stack_dft[start_idx:end_idx].detach()
+        device_euler_angles = euler_angles[start_idx:end_idx].detach()
+        device_defocus_u = defocus_u[start_idx:end_idx].detach()
+        device_defocus_v = defocus_v[start_idx:end_idx].detach()
+        device_defocus_angle = defocus_angle[start_idx:end_idx].detach()
+        device_projective_filters = projective_filters[start_idx:end_idx].detach()
 
         kwargs = {
             "particle_stack_dft": device_particle_stack_dft,
-            "particle_indices": particle_indices,
-            "template_dft": template_dft,
+            "particle_indices": particle_indices.detach(),
+            "template_dft": template_dft.detach(),
             "euler_angles": device_euler_angles,
-            "euler_angle_offsets": euler_angle_offsets,
+            "euler_angle_offsets": euler_angle_offsets.detach(),
             "defocus_u": device_defocus_u,
             "defocus_v": device_defocus_v,
             "defocus_angle": device_defocus_angle,
-            "defocus_offsets": defocus_offsets,
-            "pixel_size_offsets": pixel_size_offsets,
-            "corr_mean": corr_mean,
-            "corr_std": corr_std,
+            "defocus_offsets": defocus_offsets.detach(),
+            "pixel_size_offsets": pixel_size_offsets.detach(),
+            "corr_mean": corr_mean.detach(),
+            "corr_std": corr_std.detach(),
             "projective_filters": device_projective_filters,
             "ctf_kwargs": ctf_kwargs,
             "batch_size": batch_size,
