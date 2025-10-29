@@ -414,9 +414,16 @@ def setup_images_filters_particle_stack(
     )
 
     # Calculate and apply the filters for the particle image stack
-    filter_stack = particle_stack.construct_filter_stack(
-        preprocessing_filters, output_shape=particle_images_dft.shape[-2:]
-    )
+    if movie is not None and deformation_field is not None:
+        filter_stack = particle_stack.construct_filter_stack(
+            preprocessing_filters, output_shape=particle_images_dft.shape[-2:],
+            image_tensor=particle_images,
+        )
+    else:
+        filter_stack = particle_stack.construct_filter_stack(
+            preprocessing_filters, output_shape=particle_images_dft.shape[-2:],
+            image_tensor=particle_images,
+        )
 
     particle_images_dft = preprocess_image(
         image_rfft=particle_images_dft,
@@ -556,7 +563,7 @@ def dose_weight(
     # get the height and width from the last two dimensions
     frame_shape = (movie_fft.shape[-2], movie_fft.shape[-1]*2 - 2)
     #mean zero
-    movie_fft[..., 0, 0] = 0.0 + 0.0j
+    #movie_fft[..., 0, 0] = 0.0 + 0.0j
     #apply dose weight
     movie_dw_dft = dose_weight_movie(
         movie_dft=movie_fft,
@@ -570,6 +577,6 @@ def dose_weight(
         fftshift=False,
     )
     #inverse FFT
-    movie_dw = torch.fft.irfft2(movie_dw_dft, s=frame_shape, dim=(-2, -1), norm='ortho')
+    movie_dw = torch.fft.irfft2(movie_dw_dft, s=frame_shape, dim=(-2, -1))
     image_dw = torch.sum(movie_dw, dim=0)
     return image_dw

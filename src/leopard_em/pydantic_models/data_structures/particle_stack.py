@@ -7,12 +7,13 @@ import numpy as np
 import pandas as pd
 import torch
 from pydantic import ConfigDict
+import einops
 
 from leopard_em.pydantic_models.config import PreprocessingFilters
 from leopard_em.pydantic_models.custom_types import BaseModel2DTM, ExcludedTensor
 from leopard_em.pydantic_models.formats import MATCH_TEMPLATE_DF_COLUMN_ORDER
 from leopard_em.pydantic_models.utils import dose_weight
-from leopard_em.utils.data_io import load_mrc_image
+from leopard_em.utils.data_io import load_mrc_image, write_mrc_from_tensor
 
 from torch_motion_correction.correct_motion import get_pixel_shifts
 from torch_motion_correction.deformation_field_utils import evaluate_deformation_field_at_t
@@ -336,6 +337,7 @@ class ParticleStack(BaseModel2DTM):
 
     # Cropped out view of the particles from images
     image_stack: ExcludedTensor
+    image_shifted: ExcludedTensor
 
     def __init__(self, skip_df_load: bool = False, **data: dict[str, Any]):
         """Initialize the ParticleStack object.
@@ -511,6 +513,13 @@ class ParticleStack(BaseModel2DTM):
 
         self.image_stack = image_stack
 
+        '''
+        #save as mrc
+        write_mrc_from_tensor(
+            data=image_stack.detach(),
+            mrc_path="debug_tests/saved_mrc/imaged_aligned_shifted5.mrc",
+        )
+        '''
         return image_stack
 
     def construct_cropped_statistic_stack(
@@ -608,7 +617,10 @@ class ParticleStack(BaseModel2DTM):
         return stat_stack
 
     def construct_filter_stack(
-        self, preprocess_filters: PreprocessingFilters, output_shape: tuple[int, int]
+        self, 
+        preprocess_filters: PreprocessingFilters, 
+        output_shape: tuple[int, int],
+        image_tensor: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Get stack of Fourier filters from filter config and reference micrographs.
 
@@ -622,6 +634,13 @@ class ParticleStack(BaseModel2DTM):
             Configuration object of filters to apply.
         output_shape : tuple[int, int]
             What shape along the last two dimensions the filters should be.
+        image_tensor : torch.Tensor | None, optional
+            Optional image tensor to use instead of loading from micrograph paths.
+            Can be either a single 2D image or a stack of 2D images (3D tensor).
+            - Single 2D image: Global whitening - same filter applied to all particles
+            - 3D stack: Local whitening - different filter for each particle (one-to-one mapping)
+            - None: Original approach - load from micrograph paths, group by micrograph
+            Default is None.
 
         Returns
         -------
@@ -632,21 +651,47 @@ class ParticleStack(BaseModel2DTM):
         # Create an empty tensor to store the filter stack
         filter_stack = torch.zeros((self.num_particles, *output_shape))
 
-        # Find the indexes in the DataFrame that correspond to each unique image
-        image_index_groups = self._df.groupby("micrograph_path").groups
+        if image_tensor is not None:
+            if image_tensor.dim() == 3:
+                # Stack of images - local whitening (different filter for each particle)
+                for i, img in enumerate(image_tensor):
+                    image_dft = torch.fft.rfftn(img)  # pylint: disable=not-callable
+                    image_dft[0, 0] = 0 + 0j
+                    cumulative_filter = preprocess_filters.get_combined_filter(
+                        ref_img_rfft=image_dft,
+                        output_shape=output_shape,
+                    )
+                    
+                    # Apply filter to corresponding particle
+                    if i < self.num_particles:
+                        filter_stack[i] = cumulative_filter
+            else:
+                # Single image - global whitening (same filter for all particles)
+                image_dft = torch.fft.rfftn(image_tensor)  # pylint: disable=not-callable
+                image_dft[0, 0] = 0 + 0j
+                cumulative_filter = preprocess_filters.get_combined_filter(
+                    ref_img_rfft=image_dft,
+                    output_shape=output_shape,
+                )
+                
+                # Apply the same filter to all particles
+                filter_stack[:] = cumulative_filter
+        else:
+            # Find the indexes in the DataFrame that correspond to each unique image
+            image_index_groups = self._df.groupby("micrograph_path").groups
 
-        # Loop over each unique image and extract the particles
-        for img_path, indexes in image_index_groups.items():
-            img = load_mrc_image(img_path)
+            # Loop over each unique image and extract the particles
+            for img_path, indexes in image_index_groups.items():
+                img = load_mrc_image(img_path)
 
-            image_dft = torch.fft.rfftn(img)  # pylint: disable=not-callable
-            image_dft[0, 0] = 0 + 0j
-            cumulative_filter = preprocess_filters.get_combined_filter(
-                ref_img_rfft=image_dft,
-                output_shape=output_shape,
-            )
+                image_dft = torch.fft.rfftn(img)  # pylint: disable=not-callable
+                image_dft[0, 0] = 0 + 0j
+                cumulative_filter = preprocess_filters.get_combined_filter(
+                    ref_img_rfft=image_dft,
+                    output_shape=output_shape,
+                )
 
-            filter_stack[indexes] = cumulative_filter
+                filter_stack[indexes] = cumulative_filter
 
         return filter_stack
 
@@ -932,7 +977,10 @@ class ParticleStack(BaseModel2DTM):
         pos_y_center = torch.tensor(pos_y_center)
         pos_x_center = torch.tensor(pos_x_center)
         aligned_particle_movies_rfft = torch.zeros((self.num_particles, t, box_h, box_w//2 + 1), dtype=torch.complex64)
+        movie = set_frames_mean_zero(movie)
+        corrected_movie_frames = torch.zeros_like(movie)
         for frame_index, movie_frame in enumerate(movie):
+
             print(f"Extracting particle images for frame {frame_index} of {t}")
             # If memoery becomes an issue, do this in batches of particles
             # Get the shift in the deformation field for the center pixel
@@ -941,6 +989,7 @@ class ParticleStack(BaseModel2DTM):
                 t=normalized_t[frame_index],
                 grid_shape=(10 * gh, 10 * gw),
             )
+            print(f"pixel_sizes[0]: {pixel_sizes[0]}")
             pixel_shifts = get_pixel_shifts(
                 frame=movie_frame,
                 pixel_spacing=pixel_sizes[0],
@@ -950,7 +999,17 @@ class ParticleStack(BaseModel2DTM):
             
             y_shifts = -pixel_shifts[pos_y_center, pos_x_center, 0]  # y-component of shifts
             x_shifts = -pixel_shifts[pos_y_center, pos_x_center, 1]  # x-component of shifts
+            print(f"frame {frame_index}: y_shifts: {y_shifts[0]}, x_shifts: {x_shifts[0]}")
 
+            deformed_pixel_coords = pixel_grid + pixel_shifts
+
+            movie_frame_deformed = sample_image_2d(
+                image=movie_frame,
+                coordinates=deformed_pixel_coords,
+                interpolation="bicubic",
+            )
+
+            corrected_movie_frames[frame_index] = movie_frame_deformed
             '''
             #extract with sub-pixel precision
             pos_y_center_corrected = (pos_y_center - y_shifts)
@@ -990,19 +1049,56 @@ class ParticleStack(BaseModel2DTM):
             # in the `get_cropped_image_regions` function. Relative referencing handled
             # by the ParticleStack class.
             cropped_images = get_cropped_image_regions(
-                movie_frame,
+                movie_frame_deformed,
                 pos_y,
                 pos_x,
                 self.extracted_box_size,
                 pos_reference="top-left",
-                handle_bounds=handle_bounds,
+                handle_bounds=handle_bounds, 
+                padding_mode=padding_mode,
+                padding_value=padding_value,
+            )
+            '''
+            cropped_shifts_y = get_cropped_image_regions(
+                deformed_pixel_coords[:, :, 0],
+                pos_y,
+                pos_x,
+                self.extracted_box_size,
+                pos_reference="top-left",
+                handle_bounds=handle_bounds, 
                 padding_mode=padding_mode,
                 padding_value=padding_value,
             )
 
+            cropped_shifts_x = get_cropped_image_regions(
+                deformed_pixel_coords[:, :, 1],
+                pos_y,
+                pos_x,
+                self.extracted_box_size,
+                pos_reference="top-left",
+                handle_bounds=handle_bounds, 
+                padding_mode=padding_mode,
+                padding_value=padding_value,
+            )
+            cropped_images_deformed = torch.zeros_like(cropped_images)
+            for i in range(pos_y.shape[0]):
+                print(f"Sampling particle {i} of {pos_y.shape[0]}")
+                cropped_images_deformed[i] = sample_image_2d(
+                    image=cropped_images[i],
+                    coordinates=torch.stack((cropped_shifts_y[i], cropped_shifts_x[i]), dim=-1),
+                    interpolation="bicubic",
+                )
+            '''
+
+            # Try applying full deformation field as a control
+
+
+
             #Now Fourier shift the cropped images (use torch-fourier-shift)
             cropped_images_dft = torch.fft.rfftn(cropped_images, dim=(-2, -1))
+            #cropped_images_dft = torch.fft.rfftn(cropped_images_deformed, dim=(-2, -1))
             
+            '''
             shifted_fft = fourier_shift_dft_2d(
                 dft=cropped_images_dft,
                 image_shape=(box_h, box_w),
@@ -1010,14 +1106,38 @@ class ParticleStack(BaseModel2DTM):
                 rfft=True,
                 fftshifted=False,
             )
+            '''
+            shifted_fft = cropped_images_dft
             
             
             #store them in a tensor shape (N, t, box_h, box_w)
             aligned_particle_movies_rfft[:, frame_index] = shifted_fft
-            
+            #aligned_particle_movies_rfft[:, frame_index] = cropped_images_dft
             
 
         # Next will be sum  and dose weight
+        '''
+        write_mrc_from_tensor(
+            data=corrected_movie_frames.detach(),
+            mrc_path="debug_tests/saved_mrc/movie_shift.mrc",
+            overwrite=True,
+        )
+        '''
+        corrected_movie_frames_dft = torch.fft.rfftn(corrected_movie_frames, dim=(-2, -1))
+        dw_sum_whole_movie = dose_weight(
+            movie_fft=corrected_movie_frames_dft,
+            pixel_size=pixel_sizes[0],
+            pre_exposure=pre_exposure,
+            dose_per_frame=dose_per_frame,
+            voltage=self._df["voltage"].to_numpy()[0]
+        )
+        '''
+        write_mrc_from_tensor(
+            data=dw_sum_whole_movie.detach(),
+            mrc_path="debug_tests/saved_mrc/movie_shift_dw.mrc",
+            overwrite=True,
+        )
+        '''
         # Want to be able to alter dose weighting in future
         aligned_particle_images = torch.zeros((self.num_particles, box_h, box_w))
         for particle_index in range(self.num_particles):
@@ -1034,4 +1154,80 @@ class ParticleStack(BaseModel2DTM):
 
         self.image_stack = aligned_particle_images
 
+        # write the aligned particle images to an mrc file
+        '''
+        print(f"Writing aligned particle images to mrc file")
+        write_mrc_from_tensor(
+            data=aligned_particle_images.detach(),
+            mrc_path="debug_tests/saved_mrc/movie_shift_dw_particles.mrc",
+            overwrite=True,
+        )
+        '''
+
         return aligned_particle_images
+
+def normalize_movie(
+    image: torch.Tensor, frac_low: float = 0.25, frac_high: float = 0.75
+) -> torch.Tensor:
+    """Normalizes the image by mean and std of a central box.
+
+    Parameters
+    ----------
+    image: torch.Tensor
+        (t, h, w) image to be normalized where t is the number of frames,
+        h is the height, and w is the width.
+    frac_low: float
+        Fractional lower bound of the central box in both height and width. Default is
+        0.25 (central 50%).
+    frac_high: float
+        Fractional upper bound of the central box in both height and width. Default is
+        0.75 (central 50%).
+
+    Returns
+    -------
+    normalized_image: torch.Tensor
+        (t, h, w) normalized image.
+    """
+    # grab image dimensions
+    t, h, w = image.shape
+    print(f"image shape: {image.shape}")
+
+    # calculate limits of central box
+    hl, hu = int(frac_low * h), int(frac_high * h)
+    wl, wu = int(frac_low * w), int(frac_high * w)
+
+    # calculate mean and std of central 50%
+    center = image[:, hl:hu, wl:wu]
+    std, mean = torch.std_mean(center, dim=(-3, -2, -1))
+    #std, mean = torch.std_mean(center, dim=(-2, -1))
+    #print(f"mean shape: {mean.shape}, std shape: {std.shape}")
+    #mean = einops.rearrange(mean, "t -> t 1 1")
+    #std = einops.rearrange(std, "t -> t 1 1")
+
+    # normalize and return
+    image = (image - mean) / std
+    return image
+
+def set_frames_mean_zero(movie: torch.Tensor) -> torch.Tensor:
+    """
+    Set each frame in the movie to have mean zero by subtracting the frame mean.
+    Uses vectorized operations for improved performance.
+    
+    Args:
+        movie: Movie array with shape (n_frames, height, width)
+        
+    Returns:
+        Movie array with each frame having mean zero
+    """
+    print(f"Setting each frame to mean zero (vectorized)...")
+    
+    # Calculate mean for each frame along the spatial dimensions (axis=(1,2))
+    frame_means = torch.mean(movie, dim=(-2, -1), keepdim=True)
+    
+    # Subtract the mean from each frame using broadcasting
+    movie_mean_zero = movie - frame_means
+    
+    n_frames = movie.shape[0]
+    print(f"  Completed mean zero correction for {n_frames} frames")
+    
+    return movie_mean_zero
