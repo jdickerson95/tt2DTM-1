@@ -8,7 +8,7 @@ from pydantic import ConfigDict
 
 from leopard_em.backend.core_inspect_peaks import core_inspect_peaks
 from leopard_em.pydantic_models.config import (
-    ComputationalConfig,
+    ComputationalConfigRefine,
     PreprocessingFilters,
 )
 from leopard_em.pydantic_models.custom_types import BaseModel2DTM, ExcludedTensor
@@ -50,7 +50,7 @@ class InspectPeaksManager(BaseModel2DTM):
     template_volume_path: str  # In df per-particle, but ensure only one reference
     particle_stack: ParticleStack
     preprocessing_filters: PreprocessingFilters
-    computational_config: ComputationalConfig
+    computational_config: ComputationalConfigRefine
 
     # Excluded tensors
     template_volume: ExcludedTensor

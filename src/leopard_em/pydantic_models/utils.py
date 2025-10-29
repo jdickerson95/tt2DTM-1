@@ -405,13 +405,13 @@ def setup_images_filters_particle_stack(
             dose_per_frame=dose_per_frame,
         )
     else:
-    particle_images = particle_stack.construct_image_stack(
-        pos_reference="top-left",
-        padding_value=0.0,
-        handle_bounds="pad",
-        padding_mode="constant",
-        mrc_image=mrc_image,
-    )
+        particle_images = particle_stack.construct_image_stack(
+            pos_reference="top-left",
+            padding_value=0.0,
+            handle_bounds="pad",
+            padding_mode="constant",
+            mrc_image=mrc_image,
+        )
 
     # FFT the particle images
     # pylint: disable=E1102
@@ -429,7 +429,7 @@ def setup_images_filters_particle_stack(
     # Calculate and apply the filters for the particle image stack
     filter_stack = particle_stack.construct_filter_stack(
         preprocessing_filters, output_shape=particle_images_dft.shape[-2:],
-        image_tensor=particle_images,
+        image_tensor=particle_images,  # passing this means local filters
     ).to(device)
 
     particle_images_dft = preprocess_image(
@@ -442,6 +442,7 @@ def setup_images_filters_particle_stack(
     projective_filters = particle_stack.construct_filter_stack(
         preprocessing_filters,
         output_shape=(template.shape[-2], template.shape[-1] // 2 + 1),
+        image_tensor=particle_images,
     ).to(device)
 
     template_dft = volume_to_rfft_fourier_slice(template)
@@ -462,11 +463,11 @@ def setup_particle_backend_kwargs(
     euler_angle_offsets: torch.Tensor,
     defocus_offsets: torch.Tensor,
     pixel_size_offsets: torch.Tensor,
-    movie: torch.Tensor,
-    deformation_field: torch.Tensor,
-    pre_exposure: float,
-    dose_per_frame: float,
     device_list: list,
+    movie: torch.Tensor = None,
+    deformation_field: torch.Tensor = None,
+    pre_exposure: float = 0.0,
+    dose_per_frame: float = 1.0,
     mrc_image: torch.Tensor = None,
 ) -> dict[str, Any]:
     """Create common kwargs dictionary for template backend functions.

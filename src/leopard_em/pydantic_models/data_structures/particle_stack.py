@@ -712,13 +712,13 @@ class ParticleStack(BaseModel2DTM):
         """
         # Create an empty tensor to store the filter stack
         filter_stack = torch.zeros((self.num_particles, *output_shape))
-
         if image_tensor is not None:
             if image_tensor.dim() == 3:
                 # Stack of images - local whitening (different filter for each particle)
                 for i, img in enumerate(image_tensor):
                     image_dft = torch.fft.rfftn(img)  # pylint: disable=not-callable
                     image_dft[0, 0] = 0 + 0j
+                    image_dft=image_dft.contiguous()
                     cumulative_filter = preprocess_filters.get_combined_filter(
                         ref_img_rfft=image_dft,
                         output_shape=output_shape,

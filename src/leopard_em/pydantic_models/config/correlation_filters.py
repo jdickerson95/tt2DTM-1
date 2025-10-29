@@ -93,7 +93,7 @@ class WhiteningFilterConfig(BaseModel2DTM):
 
         # Convert to real-space shape for function call
         output_shape = output_shape[:-1] + (2 * (output_shape[-1] - 1),)
-
+        
         return whitening_filter(
             image_dft=ref_img_rfft,
             rfft=True,
@@ -398,6 +398,11 @@ class PreprocessingFilters(BaseModel2DTM):
         arbitrary_curve_filter_tensor = ac_config.calculate_arbitrary_curve_filter(
             output_shape=output_shape
         )
+
+        # Ensure all filters are on the same device as the whitening filter
+        device = whitening_filter_tensor.device
+        bandpass_filter_tensor = bandpass_filter_tensor.to(device)
+        arbitrary_curve_filter_tensor = arbitrary_curve_filter_tensor.to(device)
 
         combined_filter = (
             whitening_filter_tensor
